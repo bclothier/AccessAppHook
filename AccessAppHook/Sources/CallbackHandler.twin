@@ -1,0 +1,19 @@
+Private Module CallbackHandler
+    Public Sub InvokeAfterSaveCallback()
+        On Error GoTo ErrHandler
+        
+        Dim Upper As Long
+        Dim ObjectData() As ObjectData
+        Logger.PrintDebug("Executing 'ObjectTracker.GetArray()'", CurrentComponentName, CurrentProcedureName)
+        ObjectData = ObjectTracker.GetArray(Upper)
+        Logger.PrintDebug("Executing InvokeAfterSaveCallback procedure '" & "'", CurrentComponentName, CurrentProcedureName)
+        DllGlobal.AccessApp.Run "MSAccessVCS.HandleExportCallback", Upper, ObjectData
+    
+    ExitProc:
+        Exit Sub
+        
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Sub
+End Module

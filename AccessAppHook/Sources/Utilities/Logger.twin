@@ -1,0 +1,72 @@
+Private Module Logger
+    Private Type TState
+        FileHandle As Integer
+        FilePath As String
+        Frequency As LongLong
+        Start As LongLong
+    End Type
+    Private This As Tstate
+
+    Public Sub Initialize()
+        If Len(This.FilePath) Then
+            Exit Sub
+        End If
+        
+        If Kernel32.QueryPerformanceFrequency(This.Frequency) = False Then
+            This.Frequency = 1 ' Avoid a division by zero error
+            '???
+        End If
+        
+        If Kernel32.QueryPerformanceCounter(This.Start) = False Then
+            '???
+        End If
+                
+        This.FilePath = App.Path & "\MSAccessVCSHook.log"
+        
+        If Len(Dir$(This.FilePath, vbDirectory)) Then
+            Kill This.FilePath
+        End If
+        
+        This.FileHandle = FreeFile()
+        
+        WriteLine "Start: " & vbTab & Format$(Now(), "yyyy-mm-dd hh:nn:ss")
+    End Sub
+    
+    Public Sub Close()
+        WriteLine "End: " & vbTab & Format$(Now(), "yyyy-mm-dd hh:nn:ss")
+    End Sub
+    
+    Private Const PaddingWidth As Long = 48
+    Private Const MinPaddingWidth As Long = 4
+    Public Sub PrintDebug(Message As String, ComponentName As String, ProcedureName As String)
+        Dim Padding As Long = PaddingWidth - (Len(ComponentName) + Len(ProcedureName) + 1)
+        If Padding <= 0 Then Padding = MinPaddingWidth
+        WriteLine Timestamp() & vbTab & " DEBUG: " & vbTab & ComponentName & "." & ProcedureName & Space$(Padding) & vbTab & Message
+    End Sub
+    
+    Public Sub PrintError(Message As String, ComponentName As String, ProcedureName As String)
+        Dim Padding As Long = PaddingWidth - (Len(ComponentName) + Len(ProcedureName) + 1)
+        If Padding <= 0 Then Padding = MinPaddingWidth
+        WriteLine Timestamp() & vbTab & " ERROR: " & vbTab & ComponentName & "." & ProcedureName & Space$(Padding) & vbTab & Message
+    End Sub
+    
+    Private Sub WriteLine(Line As String)
+    	Open This.FilePath For Append Access Read Write Shared Encoding utf_8_bom As This.FileHandle
+        Print #This.FileHandle, Line
+        Close This.FileHandle
+    End Sub
+    
+    Private Function Timestamp() As String
+        Const MicrosecondPrecision As LongLong = 1000000^
+                                                 
+        Dim Ticks As LongLong
+    	Kernel32.QueryPerformanceCounter Ticks
+        
+        Dim Microseconds As LongLong = ((Ticks - This.Start) * MicrosecondPrecision) / This.Frequency
+        Dim Seconds As Date = DateAdd("s", Microseconds / MicrosecondPrecision, 0)
+        Dim FractionalPart As Decimal = Microseconds / MicrosecondPrecision
+        FractionalPart -= Int(FractionalPart)
+
+        Return Format$(Seconds, "hh:nn:ss") & "." & Mid$(FractionalPart, 3, 6)
+    End Function
+End Module

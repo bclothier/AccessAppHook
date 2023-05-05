@@ -1,0 +1,22 @@
+' Note: those are redircted automatically by tB and does not actually to refer the file "msvbvm60.dll"
+' twinBASIC will fix those declares up to an internal implementation so that there is no dependencies. 
+' We want to use those declares because they have much less overhead than RtlMoveMemory function. 
+Private Module msvbvm60
+    Public Declare PtrSafe Sub GetMem1 Lib "msvbvm60.dll" (ByVal addr As LongPtr, retVal As Byte)
+    Public Declare PtrSafe Sub GetMem2 Lib "msvbvm60.dll" (ByVal addr As LongPtr, retVal As Integer)
+    Public Declare PtrSafe Sub GetMem4 Lib "msvbvm60.dll" (ByVal addr As LongPtr, retVal As Long)
+    Public Declare PtrSafe Sub GetMem8 Lib "msvbvm60.dll" (ByVal addr As LongPtr, retVal As LongLong)
+    
+    Public Declare PtrSafe Sub PutMem1 Lib "msvbvm60.dll" (ByVal addr As LongPtr, ByVal retVal As Byte)
+    Public Declare PtrSafe Sub PutMem2 Lib "msvbvm60.dll" (ByVal addr As LongPtr, ByVal retVal As Integer)
+    Public Declare PtrSafe Sub PutMem4 Lib "msvbvm60.dll" (ByVal addr As LongPtr, ByVal retVal As Long)
+    Public Declare PtrSafe Sub PutMem8 Lib "msvbvm60.dll" (ByVal addr As LongPtr, ByVal retVal As LongLong)
+    
+    #If Win64 Then
+    Public Declare PtrSafe Sub GetMemPtr Lib "msvbvm60.dll" Alias "GetMem8" (ByVal addr As LongPtr, retVal As LongPtr)
+    Public Declare PtrSafe Sub PutMemPtr Lib "msvbvm60.dll" Alias "PutMem8" (ByVal addr As LongPtr, ByVal retVal As LongPtr)
+    #ElseIf Wine32 Then
+    Public Declare PtrSafe Sub GetMemPtr Lib "msvbvm60.dll" Alias "GetMem4" (ByVal addr As LongPtr, retVal As LongPtr)
+    Public Declare PtrSafe Sub PutMemPtr Lib "msvbvm60.dll" Alias "PutMem4" (ByVal addr As LongPtr, ByVal retVal As LongPtr)
+    #End If
+End Module

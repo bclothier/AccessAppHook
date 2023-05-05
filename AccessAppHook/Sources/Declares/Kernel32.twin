@@ -1,0 +1,74 @@
+Private Module Kernel32
+    Public Enum GetModuleHandleExW
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS = &H4&
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT = &H2&
+    End Enum
+    
+    ' BOOL GetModuleHandleExW(
+    '   [in]           DWORD   dwFlags,
+    '   [in, optional] LPCSTR  lpModuleName,
+    '   [out]          HMODULE *phModule
+    ' );
+    Public DeclareWide PtrSafe Function GetModuleHandleExW _
+    Lib "Kernel32.dll" ( _
+        ByVal dwFlags As Long, _ 
+        ByVal lpModuleName As LongPtr, _ 
+        ByRef phModule As LongPtr _ 
+    ) As Long
+    
+    ' HANDLE GetCurrentProcess();
+    Public DeclareWide PtrSafe Function GetCurrentProcess _
+    Lib "Kernel32.dll" () As LongPtr
+    
+    ' int lstrlenA(
+    '   [in] LPCSTR lpString
+    ' ); 
+    Public DeclareWide PtrSafe Function lstrlenA _
+    Lib "Kernel32.dll" ( _ 
+        ByVal lpString As LongPtr _ 
+    ) As Long
+    
+    ' int lstrlenW(
+    '   [in] LPCWSTR lpString
+    ' );    
+    Public DeclareWide PtrSafe Function lstrlenW _
+    Lib "Kernel32.dll" ( _ 
+        ByVal lpString As LongPtr _ 
+    ) As Long
+    
+    ' UINT GetAtomNameW(
+    '   [in]  ATOM   nAtom,
+    '   [out] LPWSTR lpBuffer,
+    '   [in]  int    nSize
+    ' );
+    Public DeclareWide PtrSafe Function GetAtomNameW _ 
+    Lib "Kernel32.dll" ( _  
+        ByVal nAtom As Integer, _ 
+        ByVal lpBuffer As String, _ 
+        ByVal nSize As Long _ 
+    ) As Long
+    
+    ' DWORD GetProcessId(
+    '   [in] HANDLE Process
+    ' );
+    Public DeclareWide PtrSafe Function GetProcessId _
+    Lib "Kernel32.dll" ( _ 
+        ByVal Process As LongPtr _
+    ) As Long
+    
+    ' BOOL QueryPerformanceFrequency(
+    '   [out] LARGE_INTEGER *lpFrequency
+    ' );
+    Public Declare PtrSafe Function QueryPerformanceFrequency _
+    Lib "kernel32" ( _
+        ByRef Frequency As LongLong _
+    ) As Long
+    
+    ' BOOL QueryPerformanceCounter(
+    '   [out] LARGE_INTEGER *lpPerformanceCount
+    ' );    
+    Public Declare PtrSafe Function QueryPerformanceCounter _ 
+    Lib "kernel32" ( _
+        ByRef Counter As LongLong _ 
+    ) As Long
+End Module

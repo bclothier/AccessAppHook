@@ -1,0 +1,49 @@
+' There are currently 4 entry points exposed as a exported function which can be called via a Declare
+' statement: 
+'       StartHook(ByRef Config As HookConfiguration) As Boolean
+'       StopHook() As Boolean
+' 
+Public Module DllGlobal
+    Public Type HookConfiguration
+        Size As Long
+        App As Access.Application
+        CallbackProject As VBIDE.VBProject
+        AfterSaveRequestDelayMilliseconds As Long
+        AfterSaveCallbackProcedureName As String
+    End Type
+    
+    Private Type TState
+        App As Access.Application
+        AfterSaveRequestDelayMilliseconds As Long
+        CallbackProjectName As String
+        AfterSaveCallbackProcedureName As String
+    End Type
+    Private This As TState
+        
+    [ DllExport ]
+    Public Function StartHook(ByRef Config As HookConfiguration) As Boolean
+        Set This.App = Config.App
+        This.CallbackProjectName = Config.CallbackProject.Name
+        This.AfterSaveCallbackProcedureName = Config.AfterSaveCallbackProcedureName
+        This.AfterSaveRequestDelayMilliseconds = Config.AfterSaveRequestDelayMilliseconds
+        
+        Return Hook.Initialize(This.AfterSaveRequestDelayMilliseconds)
+    End Function
+    
+    [ DllExport ]
+    Public Function StopHook() As Boolean
+        Set This.App = Nothing
+        Return Hook.Release
+    End Function
+    
+    Public Property Get AccessApp() As Access.Application
+        Return This.App
+    End Property
+    
+    Public Property Get SourceVBProject() As VBIDE.VBProject
+        With This.App.WizHook
+            .Key = 51488399
+            Return .DbcVbProject
+        End With
+    End Property
+End Module

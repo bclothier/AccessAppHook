@@ -1,0 +1,881 @@
+' This module handles both hooking, subclassing and timers. This module also acts as the entry 
+' point to enable the whole functionality of being able to automatically track design changes being saved.
+'
+' Though there are functions in place to automatically stop subclassing and unhook during window destruction, it's 
+' probably nicer and tidy to explicitly call StopHook when shutting down. 
+'
+' Two hooks are used; WH_GETMESSAGE and WH_CBT.
+'
+' The WH_GETMESSAGE hook (handled via GetMsgProc callback procedure) allows us to intercept 
+' keystrokes before they are tranlated into accelerators. This receives all messages associated
+' with the main thread UI, so we must filter it and act quickly to exit the procedure and avoid
+' holding up the message pump. 
+'
+' The WH_CBT hook (handled via CbtProc callback procedure) allows us to intercdpt any new windows
+' being created, which we can use to monitor for either new designer ewindow being created or a new
+' dialog being created. If we determine this is a window we are interested, we will then subclass that
+' window. 
+'
+' The object designer windows get subclassed with the ObjectDesignerWndProc procedure. This allows us to 
+' listen to keystrokes intercepted at that window that may otherwise not reach the GetMsgProc procedure. 
+'
+' The dialogs get subclassed with the SaveDialogWndProc procedure. We use the WM_WINDOWPOSCHANGED + SWP_SHOW
+' to indicate that it's ready to be shown to the user and use DialogInspector module to analyze and collect
+' data on it. We also listen to WM_COMMAND to capture user's response to the dialog, whether they used the 
+' mouse to click a button on the dialog or used keyboard accelerator. 
+'
+' Wheenver a save keyboard accelerator (e.g. Ctrl + S, Shift + F12 or F12) is invokved, a after save requested timer 
+' will be started. The timer is interrupted if a new dialog is opened, then restarted after it is dismissed unless
+' the user chose to cancel out. Once the timer elapses, it should call back into the VBA to complete after save callback. 
+' The timer is used for the following reasons:
+'       * It is possible to have an existing object that was edited, user presses Ctrl + S. There will be no dialogs 
+'         and there is no further notification that it was saved.
+'       * However, if the object is a new object, pressing Ctrl + S will open a dialog asking the user to put in a name.
+'       * But if the user has multiple windows open and has edited several objects then chose to close (without saving)
+'         Access will then prompt for each object so the user may end up dealign with multiple dialogs in sequence. 
+'       * ...and if any of the objects are VBA, then the user instead gets a listbox save dialog to save multiple objects
+'       * ...but still may get multiple dialogs after clicking Yes to the multiple selection listbox for new objects that
+'            needs to be given a name. 
+'
+' Those scenarios show that it is not practical to just callback immediately after a dialog has been dismissed or to the 
+' keystrokes. Thus, the timer is used to monitor whether a new dialog appears and is destoyed when the dialog shows, then
+' get recreated after the dialog has been dismissed, which allow us to handle multiple dialogs or no dialogs at all. More
+' importantly, by using timer callback, we avoid running VBA code inside a message pump which we really don't want to do.
+'
+' It is crucial that all procedures that are used as part of hooks, subclassing or timer callback all are enclosed with
+' an error handler and more crucially that the error handler does the right thing (e.g. call the next hook / subclass 
+' default procedure, etc. and not bubble any errors beyond this point which may cause a crash). There must be no user
+' interactions within those procedures as part of the error handling. Just log the error instad. 
+Private Module Hook
+    ' Use with User32.GetAsyncKeyState
+    Private Const Pressed As Integer = &H8000%
+
+    Private Type TState
+        CachedGetMsgHook As LongPtr
+        CachedMessageHook As LongPtr
+        CachedCbtHook As LongPtr
+        CachedAccesshWnd As LongPtr
+        CachedAccessMdiClienthWnd As LongPtr
+        CachedVbidehWnd As LongPtr
+        CachedVbideMdiClienthWnd As LongPtr
+        AfterSaveRequestedTimerId As LongPtr
+        ModuleInstance As LongPtr
+        ProcessId As Long
+        ThreadId As Long
+        AfterSaveRequestDelay As Long
+        SaveMultipleDialoghWnd As LongPtr
+        ForegroundWindowhWnd As LongPtr
+    End Type
+    Private This As TState
+    
+    Public Property Get AccessMdiClientHandle() As LongPtr
+        Return This.CachedAccessMdiClienthWnd
+    End Property
+    
+    Public Property Get VbideMdiClientHandle() As LongPtr
+        Return This.CachedVbideMdiClienthWnd
+    End Property
+    
+    Public Function Initialize(AfterSaveRequestDelayMilliseconds As Long) As Boolean
+        On Error GoTo ErrHandler
+        
+        Logger.Initialize
+        ObjectTracker.Initialize
+        This.AfterSaveRequestDelay = AfterSaveRequestDelayMilliseconds
+        
+        If Kernel32.GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS Or GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, AddressOf Hook.Initialize, This.ModuleInstance) = 0 Then
+            Logger.PrintError "Unable to get module handle:" & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+            Hook.Release
+            Return False
+        End If
+        
+        This.ThreadId = User32.GetWindowThreadProcessId(DllGlobal.AccessApp.hWndAccessApp, This.ProcessId)
+        If This.ThreadId = 0 Then
+            Logger.PrintError "Unable to get thread id: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+            Hook.Release
+            Return False
+        End If
+        
+        This.CachedAccesshWnd = DllGlobal.AccessApp.hWndAccessApp
+        
+        ' NOTE: despite what the Microsoft documentation for the SetWindowsHookEx says, setting both the module handle and the 
+        ' thread ID seems to make the hooks more stable. The documentation says that when a thread ID is passed in, the module 
+        ' handle ought to be NULL but in testing, it can be crash prone for certain actions (e.g. try to remove a VBA module 
+        ' which should show a yes/no/cancel dialog asking to export module before removing it). Setting the module instance 
+        ' prevents this crash. Why? Because Microsoft, I guess.         
+        This.CachedGetMsgHook = User32.SetWindowsHookExW(WH_GETMESSAGE, AddressOf GetMsgProc, This.ModuleInstance, This.ThreadId)
+        If This.CachedGetMsgHook = 0 Then
+            Logger.PrintError "Error hooking GetMsgHook:" & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+            Hook.Release
+            Return False
+        End If
+        
+        This.CachedCbtHook = User32.SetWindowsHookExW(WH_CBT, AddressOf CbtProc, This.ModuleInstance, This.ThreadId)
+        If This.CachedCbtHook = 0 Then
+            Logger.PrintError "Error hooking CbtHook:" & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+            Hook.Release
+            Return False
+        End If
+        
+        FindAndSubclassExistingWindows()
+            
+        This.CachedAccessMdiClienthWnd = User32.FindWindowExW(This.CachedAccesshWnd, 0, AccessClasses.MDIClientClass, vbNullString)
+        If This.CachedAccessMdiClienthWnd Then
+            Logger.PrintDebug "Hook subsystem initalized", CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  Access main window handle: " & Hex(This.CachedAccesshWnd), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  Access MDI client handle: " & Hex(This.CachedAccessMdiClienthWnd), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  VBIDE main window handle: " & Hex(This.CachedAccesshWnd), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  VBIDE MDI client handle: " & Hex(This.CachedAccessMdiClienthWnd), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  Hook module instance: " & Hex(This.ModuleInstance), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  Process Id: " & Hex(This.ProcessId), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  Thread Id: " & Hex(This.ThreadId), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "  After save request delay: " & This.AfterSaveRequestDelay, CurrentComponentName, CurrentProcedureName
+            
+            Return True
+        Else
+            Logger.PrintError "Window not found: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+        End If
+        
+        Hook.Release
+        Return False
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Hook.Release
+        Return False
+    End Function
+    
+    Public Function Release() As Boolean
+        On Error GoTo ErrHandler
+        
+        Dim Failed As Boolean
+        
+        Logger.PrintDebug "Releasing hook subsystem", CurrentComponentName, CurrentProcedureName
+        
+        If This.AfterSaveRequestedTimerId Then
+            If User32.KillTimer(0, This.AfterSaveRequestedTimerId) Then
+                Logger.PrintDebug "After save requested timer killed: " & Hex(This.AfterSaveRequestedTimerId), CurrentComponentName, CurrentProcedureName
+                This.AfterSaveRequestedTimerId = 0
+            Else
+                Logger.PrintError "Unable to kill after save requested timer " & Hex(This.AfterSaveRequestedTimerId) & "; error " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                Failed = True
+            End If
+        End If
+        
+        If This.CachedAccessMdiClienthWnd Then
+            Dim ChildhWnd As LongPtr
+            Do
+                ChildhWnd = User32.FindWindowExW(This.CachedAccessMdiClienthWnd, ChildhWnd, vbNullString, vbNullString)
+                If ChildhWnd Then
+                    Dim ChildClassName As String
+                    Dim Length As Long
+                    ChildClassName = Space$(32)
+                    Length = User32.GetClassNameW(ChildhWnd, ChildClassName, Len(ChildClassName))
+                    If Length Then
+                        Select Case Left$(ChildClassName, Length)
+                            Case AccessClasses.TableClass, _
+                                 AccessClasses.QueryClass, _ 
+                                 AccessClasses.FormClass, _ 
+                                 AccessClasses.ReportClass, _ 
+                                 AccessClasses.ScriptClass
+                                If Comctl32.RemoveWindowSubclass(ChildhWnd, AddressOf ObjectDesignerWndProc, 0) Then
+                                    Logger.PrintDebug "Removed subclass: " & Hex(ChildhWnd), CurrentComponentName, CurrentProcedureName
+                                Else
+                                    Logger.PrintError "Removing subclass failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                                    Failed = True
+                                End If
+                        End Select
+                    Else
+                        Logger.PrintError "Unable to get class name for child window: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                        Failed = True
+                    End If
+                End If
+            Loop While ChildhWnd
+        End If
+        If This.CachedGetMsgHook Then
+            If User32.UnhookWindowsHookEx(This.CachedGetMsgHook) Then
+                Logger.PrintDebug "Unhooked GetMsgHook: (" & Hex(This.CachedGetMsgHook) & ")", CurrentComponentName, CurrentProcedureName
+                This.CachedGetMsgHook = 0
+            Else
+                Logger.PrintError "Unable to unhook GetMsgHook: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                Failed = True
+            End If
+        End If
+        
+        If This.CachedMessageHook Then
+            If User32.UnhookWindowsHookEx(This.CachedMessageHook) Then
+                Logger.PrintDebug "Unhooked MessageHook: (" & Hex(This.CachedMessageHook) & ")", CurrentComponentName, CurrentProcedureName
+                This.CachedGetMsgHook = 0
+            Else
+                Logger.PrintError "Unable to unhook MessageHook: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                Failed = True
+            End If
+        End If
+         
+        If This.CachedCbtHook Then
+            If User32.UnhookWindowsHookEx(This.CachedCbtHook) Then
+                Logger.PrintDebug "Unhooked CBT Hook: (" & Hex(This.CachedCbtHook) & ")", CurrentComponentName, CurrentProcedureName
+                This.CachedCbtHook = 0
+            Else
+                Logger.PrintError "Unable to unhook CBT Hook: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                Failed = True
+            End If
+        End If
+        
+        ObjectTracker.Reset
+        
+        Logger.PrintDebug "Result of Releasehook: " & (Not Failed), CurrentComponentName, CurrentProcedureName
+        Logger.Close
+        
+        Return (Not Failed)
+        
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Return False
+    End Function
+
+    Private Sub FindAndSubclassExistingWindows()
+        On Error GoTo ErrHandler
+        
+        SubclassExistingAccessChildWindows()
+        FindVbIdeWindows()
+        
+        If This.CachedVbideMdiClienthWnd Then
+            SubclassExistingVbIdeChildWindows()
+        End If
+        
+        Exit Sub
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Exit Sub
+    End Sub
+    
+    Private Sub FindVbIdeWindows()
+        If This.CachedVbidehWnd = 0 Then
+            Dim TmphWnd As LongPtr
+            Do
+                TmphWnd = User32.FindWindowExW(User32.GetDesktopWindow(), TmphWnd, AccessClasses.VBIDEClass, vbNullString)
+                If TmphWnd Then
+                    Dim ProcessHandle As LongPtr = Oleacc.GetProcessHandleFromHwnd(TmphWnd)
+                    If ProcessHandle Then
+                        Dim ProcessId As Long = Kernel32.GetProcessId(ProcessHandle)
+                        If ProcessId = This.ProcessId Then
+                            This.CachedVbidehWnd = TmphWnd
+                        End If
+                    End If
+                End If
+            Loop Until TmphWnd = 0
+        End If
+        
+        If This.CachedVbidehWnd Then
+            This.CachedVbideMdiClienthWnd = User32.FindWindowExW(This.CachedVbideMdiClienthWnd, 0, AccessClasses.MDIClientClass, vbNullString)
+        End If
+    End Sub
+    
+    Public Function InitializeVbIdeFromhWnd(PossibleMdiClientHwnd As LongPtr) As Boolean
+        If This.CachedVbidehWnd Then
+            Return True
+        End If
+        
+        If GetClassName(PossibleMdiClientHwnd) = AccessClasses.MDIClientClass Then
+            Dim TmphWnd As LongPtr = User32.GetParent(PossibleMdiClientHwnd)
+            If TmphWnd Then
+                Dim ProcessHandle As LongPtr = Oleacc.GetProcessHandleFromHwnd(TmphWnd)
+                If ProcessHandle Then
+                    Dim ProcessId As Long = Kernel32.GetProcessId(ProcessHandle)
+                    If ProcessId = This.ProcessId Then
+                        This.CachedVbidehWnd = TmphWnd
+                        Return True
+                    End If
+                End If
+            End If
+        End If
+    End Function
+    
+    Private Sub SubclassExistingAccessChildWindows()
+        On Error GoTo ErrHandler
+        
+        Dim ChildhWnd As LongPtr
+        
+        Do
+            ChildhWnd = User32.FindWindowExW(This.CachedAccessMdiClienthWnd, ChildhWnd, vbNullString, vbNullString)
+            If ChildhWnd Then
+                Dim ChildClassName As String
+                Dim Length As Long
+                ChildClassName = Space$(32)
+                Length = User32.GetClassNameW(ChildhWnd, ChildClassName, Len(ChildClassName))
+                If Length Then
+                    Select Case Left$(ChildClassName, Length)
+                        Case AccessClasses.TableClass, _
+                                AccessClasses.QueryClass, _ 
+                                AccessClasses.FormClass, _ 
+                                AccessClasses.ReportClass, _ 
+                                AccessClasses.ScriptClass
+                            If Comctl32.SetWindowSubclass(ChildhWnd, AddressOf ObjectDesignerWndProc, 0, 0) Then
+                                Logger.PrintDebug "Subclassing: " & Hex(ChildhWnd), CurrentComponentName, CurrentProcedureName
+                            Else
+                                Logger.PrintError "Subclassing failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                            End If
+                    End Select
+                Else
+                    Logger.PrintError "Unable to get class name for child window: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                End If
+            End If
+        Loop While ChildhWnd
+
+        Exit Sub
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Exit Sub
+    End Sub
+
+    Private Sub SubclassExistingVbIdeChildWindows()
+        On Error GoTo ErrHandler
+        
+        Dim ChildhWnd As LongPtr
+        
+        Do
+            ChildhWnd = User32.FindWindowExW(This.CachedVbideMdiClienthWnd, ChildhWnd, vbNullString, vbNullString)
+            If ChildhWnd Then
+                Dim ChildClassName As String
+                Dim Length As Long
+                ChildClassName = Space$(32)
+                Length = User32.GetClassNameW(ChildhWnd, ChildClassName, Len(ChildClassName))
+                If Length Then
+                    Select Case Left$(ChildClassName, Length)
+                        Case AccessClasses.VBModuleClass, _ 
+                             AccessClasses.VBUserFormClass
+                            If Comctl32.SetWindowSubclass(ChildhWnd, AddressOf ObjectDesignerWndProc, 0, 0) Then
+                                Logger.PrintDebug "Subclassing: " & Hex(ChildhWnd), CurrentComponentName, CurrentProcedureName
+                            Else
+                                Logger.PrintError "Subclassing failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                            End If
+                    End Select
+                Else
+                    Logger.PrintError "Unable to get class name for child window: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                End If
+            End If
+        Loop While ChildhWnd
+
+        Exit Sub
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Exit Sub
+    End Sub
+    
+    Private Function TryFindAndSubclassParent(StartinghWnd As LongPtr, OutDesiredhWnd As LongPtr) As Boolean
+        Dim DesktophWnd As LongPtr = User32.GetDesktopWindow()
+        Dim CurrenthWnd As LongPtr = StartinghWnd
+        Dim ClassName As String
+        
+        Do
+            Select Case CurrenthWnd
+                Case This.CachedAccesshWnd, This.CachedAccessMdiClienthWnd
+                    ' We've reached the Access MDI window without going through its children or the main window without 
+                    ' going through the MDI at all. We'll get the first child of MDI which is the most foreground window.
+                    Return TryFindFirstInterestingAccessWindow(CurrenthWnd)
+                Case This.CachedVbidehWnd, This.CachedVbideMdiClienthWnd
+                    ' Ditto but for VBIDE / its MDI window.
+                    Return TryFindFirstInterestingVbeWindow(CurrenthWnd)
+            End Select
+            
+            If IsInterestingWindow(CurrenthWnd) Then
+                OutDesiredhWnd = CurrenthWnd
+                Return True
+            End If
+
+            CurrenthWnd = GetParent(CurrenthWnd)
+        Loop Until CurrenthWnd = DesktophWnd
+        Return False
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Exit Function
+    End Function
+    
+    Private Function TryFindFirstInterestingAccessWindow(OutChildhWnd As LongPtr) As Boolean
+        If This.CachedAccessMdiClienthWnd = 0 Then
+            Return False
+        End If
+        
+        Dim ChildhWnd As LongPtr = User32.GetWindow(This.CachedAccessMdiClienthWnd, GetWindowCmds.GW_CHILD)
+        Do
+            Dim ClassName As String = GetClassName(ChildhWnd)
+            Select Case ClassName
+                Case AccessClasses.TableClass, _
+                     AccessClasses.QueryClass, _ 
+                     AccessClasses.FormClass, _ 
+                     AccessClasses.ReportClass, _ 
+                     AccessClasses.ScriptClass
+                    OutChildhWnd = ChildhWnd
+                    Return True
+            End Select
+            ChildhWnd = User32.GetWindow(ChildhWnd, GetWindowCmds.GW_HWNDNEXT)
+        Loop Until ChildhWnd = 0
+    End Function
+    
+    Private Function TryFindFirstInterestingVbeWindow(OutChildhWnd As LongPtr) As Boolean
+        If This.CachedVbideMdiClienthWnd = 0 Then
+            Return False
+        End If
+        
+        Dim ChildhWnd As LongPtr = User32.GetWindow(This.CachedVbideMdiClienthWnd, GetWindowCmds.GW_CHILD)
+        Do
+            Dim ClassName As String = GetClassName(ChildhWnd)
+            Select Case ClassName
+                Case AccessClasses.VBModuleClass, _ 
+                     AccessClasses.VBUserFormClass
+                    OutChildhWnd = ChildhWnd
+                    Return True
+            End Select
+            ChildhWnd = User32.GetWindow(ChildhWnd, GetWindowCmds.GW_HWNDNEXT)
+        Loop Until ChildhWnd = 0
+    End Function
+
+    Private Function IsInterestingWindow(hWnd As LongPtr) As Boolean
+        Dim ClassName As String = GetClassName(hWnd)
+        Select Case ClassName
+            Case AccessClasses.TableClass, _
+                 AccessClasses.QueryClass, _ 
+                 AccessClasses.FormClass, _ 
+                 AccessClasses.ReportClass, _ 
+                 AccessClasses.ScriptClass, _ 
+                 AccessClasses.VBModuleClass, _ 
+                 AccessClasses.VBUserFormClass
+                Return True
+        End Select
+    End Function
+    
+    ' LRESULT CALLBACK GetMsgProc(
+    '   _In_ int    code,
+    '   _In_ WPARAM wParam,
+    '   _In_ LPARAM lParam
+    ' );    
+    Private Function GetMsgProc( _
+        ByVal code As Long, _ 
+        ByVal wParam As LongPtr, _ 
+        ByRef lParam As User32.MSG _
+    ) As LongPtr
+        On Error GoTo ErrHandler
+        
+        If code >= 0 AndAlso VarPtr(lParam) AndAlso This.CachedAccesshWnd Then
+            If lParam.message = WM_KEYDOWN Then
+                Dim AncestorhWnd As LongPtr = User32.GetAncestor(lParam.hWnd, User32.GA_ROOTOWNER)
+                If AncestorhWnd = This.CachedAccesshWnd OrElse AncestorhWnd = This.CachedVbidehWnd Then
+                    ProcessKeyboardStroke (lParam.hWnd, lParam.wParam, CurrentComponentName, CurrentProcedureName)
+                End If
+            ElseIf lParam.message = WM_DESTROY AndAlso (lParam.hWnd = This.CachedAccessMdiClienthWnd OrElse lParam.hWnd = This.CachedVbideMdiClienthWnd) Then
+                Logger.PrintDebug "Unhooking in response to window destruction.", CurrentComponentName, CurrentProcedureName
+                Hook.Release
+            End If
+        End If
+        
+    ExitProc:
+        Return CallNextHookEx(This.CachedGetMsgHook, code, wParam, VarPtr(lParam))
+        
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    ' LRESULT CALLBACK CBTProc(
+    '   _In_ int    nCode,
+    '   _In_ WPARAM wParam,
+    '   _In_ LPARAM lParam
+    ' );    
+    Private Function CbtProc( _ 
+        ByVal code As CBTProcCodes, _ 
+        ByVal wParam As LongPtr, _ 
+        ByVal lParam As LongPtr _ 
+    ) As LongPtr
+        On Error GoTo ErrHandler
+        
+        Select Case code
+            Case CBTProcCodes.HCBT_CREATEWND
+                CbtProcCreateWindow(wParam, lParam)
+            'Case CBTProcCodes.HCBT_DESTROYWND
+                'Logger.PrintDebug("CBT Destroy Window; wParam: " & Hex(wParam) & ", lParam: " & Hex(lParam), CurrentComponentName, CurrentProcedureName)
+            'Case CBTProcCodes.HCBT_SETFOCUS
+                'Logger.PrintDebug("CBT Set Focus; wParam: " & Hex(wParam) & ", lParam: " & Hex(lParam), CurrentComponentName, CurrentProcedureName)
+        End Select
+        'Logger.PrintDebug("code: " & code & ", wParam: " & Hex(wParam) & ", lParam: " & Hex(lParam), CurrentComponentName, CurrentProcedureName)
+
+    ExitProc:
+        Return CallNextHookEx(This.CachedGetMsgHook, code, wParam, VarPtr(lParam))
+        
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    Private Sub CbtProcCreateWindow( _ 
+        wParam As LongPtr, _
+        lParam As User32.CBT_CREATEWNDW _
+    )
+        ' Redundant CLngPtr() is needed to allow converting the LongPtr into CREATESTRUCTW
+        CbtProcCreateStruct(wParam, lParam.hwndInsertAfter, CLngPtr(lParam.lcps))
+    End Sub
+    
+    Private Sub CbtProcCreateStruct( _ 
+        hWnd As LongPtr, _ 
+        hWndInsertAfter As LongPtr, _ 
+        createStruct As CREATESTRUCTW _
+    )
+        'Dim roothWnd As LongPtr
+        'roothWnd = GetAncestor(hWnd, GA_ROOTOWNER)
+        
+        Dim className As String
+        Dim parenthWnd As LongPtr
+        
+        className = GetClassNameOrAtomName(createStruct.lpszClass)
+        
+        Select Case className
+            Case AccessClasses.SaveDialogClass
+                ' NOTE: top-level window with WS_POPUP style returns the owner (Access's main window hwnd), not the actual parent (e.g. desktop)
+                ' At this point, we are not identifying which specific save dialog this is because this is too early. We need to wait until it
+                ' has finished creating its child controls and is ready to display.
+                ' See SaveDialogWndProc under the WM_WINDOWPOSCHANGED case for further details.
+                parenthWnd = createStruct.hwndParent
+                If parenthWnd = This.CachedAccesshWnd OrElse parenthWnd = This.CachedVbidehWnd OrElse parenthWnd = This.SaveMultipleDialoghWnd Then
+                    Logger.PrintDebug "Subclassing " & className & " with hWnd: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                    If Comctl32.SetWindowSubclass(hWnd, AddressOf SaveDialogWndProc, 0, 0) Then
+                        KillAfterSaveRequestedTimer()
+                    Else
+                        Logger.PrintError "Subclassing failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                    End If
+                Else
+                    Logger.PrintDebug "Not subclassing " & className & " with hWnd: " & Hex(hWnd) & ", the (owner) parentHwnd is " & Hex(parenthWnd) & ", and the multiple save dialog hwnd is " & Hex(This.SaveMultipleDialoghWnd), CurrentComponentName, CurrentProcedureName
+                End If
+            Case AccessClasses.TableClass, _ 
+                 AccessClasses.QueryClass, _ 
+                 AccessClasses.FormClass, _ 
+                 AccessClasses.ReportClass, _ 
+                 AccessClasses.ScriptClass
+                parenthWnd = createStruct.hwndParent
+                If parenthWnd = This.CachedAccessMdiClienthWnd Then
+                    Logger.PrintDebug "Subclassing " & className & " with hWnd: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                    If Comctl32.SetWindowSubclass(hWnd, AddressOf ObjectDesignerWndProc, 0, 0) = 0 Then
+                        Logger.PrintError "Subclassing failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                    End If
+                Else
+                    Logger.PrintDebug "Not subclassing " & className & " with hWnd: " & Hex(hWnd) & ", the parentHwnd is " & Hex(parenthWnd), CurrentComponentName, CurrentProcedureName
+                End If
+            Case AccessClasses.VBModuleClass, _ 
+                 AccessClasses.VBUserFormClass
+                If This.CachedVbideMdiClienthWnd = 0 Then
+                    parenthWnd = createStruct.hwndParent
+                    If InitializeVbIdeFromhWnd(parenthWnd) = False Then
+                        Exit Sub
+                    End If
+                End If
+                If parenthWnd = This.CachedVbideMdiClienthWnd Then
+                    Logger.PrintDebug "Subclassing " & className & " with hWnd: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                    If Comctl32.SetWindowSubclass(hWnd, AddressOf ObjectDesignerWndProc, 0, 0) = 0 Then
+                        Logger.PrintError "Subclassing failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                    End If
+                Else
+                    Logger.PrintDebug "Not subclassing " & className & " with hWnd: " & Hex(hWnd) & ", the parentHwnd is " & Hex(parenthWnd), CurrentComponentName, CurrentProcedureName
+                End If
+        End Select
+    End Sub
+    
+    Private Function ObjectDesignerWndProc( _
+        ByVal hWnd As LongPtr, _ 
+        ByVal uMsg As Long, _ 
+        ByVal wParam As LongPtr, _
+        ByVal lParam As LongPtr _
+    ) As LongPtr
+        On Error GoTo ErrHandler
+        
+        Select Case uMsg
+            Case WM_KEYDOWN
+                ProcessKeyboardStroke(hWnd, wParam, CurrentComponentName, CurrentProcedureName)
+            Case WM_DESTROY
+                If Comctl32.RemoveWindowSubclass(hWnd, AddressOf ObjectDesignerWndProc, 0) Then
+                    Logger.PrintDebug "Removed subclass: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                Else
+                    Logger.PrintError "Removing subclass failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                End If
+        End Select
+        
+    ExitProc:
+        Return Comctl32.DefSubclassProc(hWnd, uMsg, wParam, lParam)
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    Private Function SaveDialogWndProc( _
+        ByVal hWnd As LongPtr, _ 
+        ByVal uMsg As Long, _ 
+        ByVal wParam As LongPtr, _
+        ByVal lParam As LongPtr _
+    ) As LongPtr
+        On Error GoTo ErrHandler
+        
+        Select Case uMsg
+            Case WM_WINDOWPOSCHANGED
+                WindowPositionChanged(hWnd, lParam)
+            Case WM_COMMAND
+                'Logger.PrintDebug "Dialog " & Hex(hWnd) & " issued a command: wParam: " & Hex(wParam) & ", lParam: " & Hex(lParam), CurrentComponentName, CurrentProcedureName
+                Dim DialogResponse As AccessSaveDialogResponses = DialogInspector.ProcessDialogResponse(hWnd, wParam, lParam)
+                Select Case DialogResponse
+                    Case AccessSaveDialogResponses.Unknown
+                        ' Ignore
+                    Case AccessSaveDialogResponses.SaveCancelled
+                        ObjectTracker.Reset
+                        KillAfterSaveRequestedTimer()
+                        Logger.PrintDebug "Save operation cancelled.", CurrentComponentName, CurrentProcedureName
+                    Case AccessSaveDialogResponses.ObjectSaved
+                        Logger.PrintDebug "Object saved for hwnd: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                        ResetAfterSaveRequestedTimer()
+                    Case AccessSaveDialogResponses.ObjectNotSaved
+                        Logger.PrintDebug "Object NOT saved for hwnd: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                        ResetAfterSaveRequestedTimer()
+                    Case Else
+                        Logger.PrintError "Unexpected response for ProcessDialogResponse: " & DialogResponse, CurrentComponentName, CurrentProcedureName
+                End Select
+            Case WM_DESTROY
+                DialogInspector.Release(hWnd)
+                If Comctl32.RemoveWindowSubclass(hWnd, AddressOf SaveDialogWndProc, 0) Then
+                    Logger.PrintDebug "Removed subclass: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                Else
+                    Logger.PrintError "Removing subclass failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                End If
+                If hWnd = This.SaveMultipleDialoghWnd Then
+                    Logger.PrintDebug "Removed multiple save dialog hwnd: " & Hex(This.SaveMultipleDialoghWnd), CurrentComponentName, CurrentProcedureName
+                    This.SaveMultipleDialoghWnd = 0
+                End If
+            'Case Else
+                'Logger.PrintDebug "Message: " & Hex(uMsg) & ", wParam: " & Hex(wParam) & ", lParam: " & Hex(lParam), CurrentComponentName, CurrentProcedureName
+        End Select
+        
+    ExitProc:
+        Return Comctl32.DefSubclassProc(hWnd, uMsg, wParam, lParam)
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    Private Sub WindowPositionChanged(hWnd As LongPtr, WindowPos As WINDOWPOS)
+        On Error GoTo ErrHandler
+        
+        If (WindowPos.flags And ShowWindowFlags.SWP_SHOWWINDOW) = ShowWindowFlags.SWP_SHOWWINDOW Then
+            Dim DialogType As AccessSaveDialogTypes = DialogInspector.IdentifyDialog(hWnd)
+            Logger.PrintDebug "Dialog Type: " & DialogType, CurrentComponentName, CurrentProcedureName
+            If DialogType = AccessSaveDialogTypes.SaveMultiple Then
+                This.SaveMultipleDialoghWnd = hWnd
+                Logger.PrintDebug "Monitoring multiple save dialog: " & Hex(This.SaveMultipleDialoghWnd), CurrentComponentName, CurrentProcedureName
+            ElseIf DialogType = AccessSaveDialogTypes.Unknown Then
+                Logger.PrintError "Unable to identify the specific save dialog, unsubclassing: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                If Comctl32.RemoveWindowSubclass(hWnd, AddressOf SaveDialogWndProc, 0) Then
+                    Logger.PrintDebug "Removed subclass: " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+                Else
+                    Logger.PrintError "Removing subclass failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+                End If
+            End If
+            ' Logger.PrintDebug "Window shown for hwnd " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
+            ' Dim ChildhWnd As LongPtr = User32.GetWindow(hWnd, GetWindowCmds.GW_CHILD)
+            ' Do Until ChildhWnd = 0
+            '     Logger.PrintDebug "  Control " & Hex(ChildhWnd) & "; Id: " & User32.GetDlgCtrlID(ChildhWnd) & ", Class: " & GetClassName(ChildhWnd) & " Caption: " & GetCaption(ChildhWnd), CurrentComponentName, CurrentProcedureName
+            '     ChildhWnd = User32.GetWindow(ChildhWnd, GetWindowCmds.GW_HWNDNEXT)
+            ' Loop
+        End If
+
+    ExitProc:
+        Exit Sub
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Sub
+        
+    Private Function ProcessKeyboardStroke(hWnd As LongPtr, wParam As LongPtr, CallingComponentName As String, CallingProcedureName As String) As Boolean
+        On Error GoTo ErrHandler
+        
+        Dim ModifierKeys As Integer
+        Dim InterestingKeystrokePressed As Boolean
+        Dim Ignored As ObjectData
+               
+        If wParam = vbKeyS Then
+            ModifierKeys = User32.GetAsyncKeyState(vbKeyControl)
+            If (ModifierKeys And Pressed) = Pressed Then
+                Logger.PrintDebug "Ctrl + S was pressed from " & CallingComponentName & "." & CallingProcedureName & " for hWnd " & Hex(hWnd) & ".", CurrentComponentName, CurrentProcedureName
+                InterestingKeystrokePressed = True
+            End If
+        ElseIf wParam = vbKeyF12 Then
+            ModifierKeys = User32.GetAsyncKeyState(vbKeyShift)
+            If (ModifierKeys And Pressed) = Pressed Then
+                Logger.PrintDebug "Shift + F12 was pressed from " & CallingComponentName & "." & CallingProcedureName & " for hWnd " & Hex(hWnd) & ".", CurrentComponentName, CurrentProcedureName
+                InterestingKeystrokePressed = True
+            Else
+                Logger.PrintDebug "F12 was pressed from " & CallingComponentName & "." & CallingProcedureName & " for hWnd " & Hex(hWnd) & ".", CurrentComponentName, CurrentProcedureName
+                InterestingKeystrokePressed = True
+            End If
+        End If
+        
+        If InterestingKeystrokePressed Then
+        	Dim InterestinghWnd As LongPtr
+            If TryFindAndSubclassParent(hWnd, InterestinghWnd) Then
+                ObjectTracker.TryAddItemFromhWnd(InterestinghWnd, Ignored)
+                ResetAfterSaveRequestedTimer()
+            End If
+        End If
+        
+        Return True
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Return False
+    End Function
+    
+    Private Sub ResetAfterSaveRequestedTimer()
+        This.ForegroundWindowhWnd = User32.GetForegroundWindow()
+        This.AfterSaveRequestedTimerId = User32.SetTimer(0, This.AfterSaveRequestedTimerId, This.AfterSaveRequestDelay, AddressOf AfterSaveRequestedCallback)
+        If This.AfterSaveRequestedTimerId Then
+            Logger.PrintDebug("After save requested timer created: " & Hex(This.AfterSaveRequestedTimerId), CurrentComponentName, CurrentProcedureName)
+        Else
+            Logger.PrintError("Error creating after save requested timer: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName)
+        End If
+    End Sub
+    
+    Private Sub KillAfterSaveRequestedTimer()
+        If This.AfterSaveRequestedTimerId Then
+            If User32.KillTimer(0, This.AfterSaveRequestedTimerId) Then
+                Logger.PrintDebug("Killed after save request timer ID " & Hex(This.AfterSaveRequestedTimerId), CurrentComponentName, CurrentProcedureName)
+                This.AfterSaveRequestedTimerId = 0
+            Else
+                Logger.PrintError("Unable to kill after save request timer ID " & Hex(This.AfterSaveRequestedTimerId) & ": " & Err.LastDllError, CurrentComponentName, CurrentProcedureName)
+            End If
+        End If
+    End Sub
+    
+    ' void Timerproc(
+    '   HWND unnamedParam1,
+    '   UINT unnamedParam2,
+    '   UINT_PTR unnamedParam3,
+    '   DWORD unnamedParam4
+    ' ")    
+    Private Sub AfterSaveRequestedCallback(ByVal hWnd As LongPtr, ByVal uMsg As Long, ByVal timerId As LongPtr, ByVal dwTimer As Long)
+        On Error GoTo ErrHandler
+        
+        Logger.PrintDebug("After save requested timer elapsed: " & Hex(hWnd) & ", " & timerId, CurrentComponentName, CurrentProcedureName)
+        If This.AfterSaveRequestedTimerId Then
+            KillAfterSaveRequestedTimer()
+        Else
+            Logger.PrintError("No timer ID for after save requested timer: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName)
+        End If
+        
+        If ObjectTracker.Count = 0 Then
+            ' No dialogs was shown, so we need to infer the window that was active at the time of timer creation.
+            If TryGetFirstActiveInterestingWindow() = False Then
+            	Logger.PrintError("Unable to determine the active window for save operation", CurrentComponentName, CurrentProcedureName)
+                ObjectTracker.Reset()
+                Exit Sub
+            End If
+        End If
+                 
+        Logger.PrintDebug("Calling InvokeAfterSaveCallback", CurrentComponentName, CurrentProcedureName)
+        CallbackHandler.InvokeAfterSaveCallback()
+        ObjectTracker.Reset
+        
+    ExitProc:
+        Exit Sub
+        
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Sub
+    
+    Private Function TryGetFirstActiveInterestingWindow() As Boolean
+        Dim RootOwnerhWnd As LongPtr
+
+        If This.CachedVbidehWnd = 0 Then
+            FindVbIdeWindows()
+        End If
+            
+        If User32.IsWindow(This.ForegroundWindowhWnd) Then
+            Logger.PrintDebug("Cached foreground window " & Hex(This.ForegroundWindowhWnd) & " is still active. Finding its root owner", CurrentComponentName, CurrentProcedureName)
+            RootOwnerhWnd = User32.GetAncestor(This.ForegroundWindowhWnd, GetAncestorFlags.GA_ROOTOWNER)
+        Else
+            Logger.PrintDebug("Cached foreground window " & Hex(This.ForegroundWindowhWnd) & " no longer exists", CurrentComponentName, CurrentProcedureName)
+            RootOwnerhWnd = 0
+        End If
+        
+        Dim VbIdeIsActive As Boolean
+        Dim VbIdeProcessid As Long
+        If RootOwnerhWnd Then
+            If RootOwnerhWnd = This.CachedAccesshWnd Then
+                Logger.PrintDebug("Root owner hwnd " & Hex(RootOwnerhWnd) & " matches Access' hWndAccessApp so Access is in foreground", CurrentComponentName, CurrentProcedureName)
+                ' Access is in foreground.
+            ElseIf This.CachedVbidehWnd <> 0 _
+            AndAlso RootOwnerhWnd = This.CachedVbidehWnd Then
+                ' VBIDE is already opened and in foreground.
+                Logger.PrintDebug("Root owner hwnd " & Hex(RootOwnerhWnd) & " matches VBIDE's main window's hWnd so VBIDE is in foreground", CurrentComponentName, CurrentProcedureName)
+                VbIdeIsActive = True
+            Else
+                ' The foreground window doesn't appear to be either Access nor VBIDE window. Let's try and find them instead.
+                Logger.PrintDebug("Root owner hwnd " & Hex(RootOwnerhWnd) & " does not match neither Access' nor VBIDE's hWnd", CurrentComponentName, CurrentProcedureName)
+                RootOwnerhWnd = 0
+            End If
+        End If
+        
+        If RootOwnerhWnd = 0 Then
+            Dim LowerZOrderhWnd As LongPtr
+            LowerZOrderhWnd = This.CachedAccesshWnd
+            Do
+                ' This didn't seem to be either Access or VBIDE window, so let's try and find which is higher on z-order.
+                LowerZOrderhWnd = User32.FindWindowExW(User32.GetDesktopWindow(), LowerZOrderhWnd, AccessClasses.VBIDEClass, vbNullString)
+                Logger.PrintDebug("Found a possible match for VBIDE lower in z-order to Access: " & Hex(RootOwnerhWnd), CurrentComponentName, CurrentProcedureName)
+                If LowerZOrderhWnd = This.CachedVbidehWnd Then
+                    Logger.PrintDebug("The VBIDE is lower in z-order so get Access window", CurrentComponentName, CurrentProcedureName)
+                    Exit Do
+                End If
+            Loop Until LowerZOrderhWnd = 0
+            
+            If LowerZOrderhWnd = 0 Then
+                Do
+                    LowerZOrderhWnd = User32.FindWindowExW(User32.GetDesktopWindow(), This.CachedVbidehWnd, AccessClasses.MainClass, vbNullString)
+                    If LowerZOrderhWnd = This.CachedAccesshWnd Then
+                        VbIdeIsActive = True
+                        Logger.PrintDebug("The Access is lower in z-order so get VBIDE window", CurrentComponentName, CurrentProcedureName)
+                        Exit Do
+                    End If
+                Loop Until LowerZOrderhWnd = 0
+            End If
+            
+            Dim Data As ObjectData
+            If VbIdeIsActive <> False AndAlso LowerZOrderhWnd <> 0 Then
+                With DllGlobal.AccessApp.VBE
+                    If DllGlobal.SourceVBProject Is .ActiveVBProject Then
+                        If ObjectTracker.TryAddItemFromName(.SelectedVBComponent.Name, AcObjectType.acModule, Data) Then
+                            Logger.PrintDebug("Added VBA object '" & .SelectedVBComponent.Name & "' as the active object", CurrentComponentName, CurrentProcedureName)
+                        Else
+                            Logger.PrintError("Failed to add '" & .SelectedVBComponent.Name & "' as the active object", CurrentComponentName, CurrentProcedureName)
+                        End If
+                    Else
+                        Logger.PrintDebug("Found active VBA object '" & .SelectedVBComponent.Name & "' but it does not appear to be in the source VBA project.", CurrentComponentName, CurrentProcedureName)
+                    End If
+                End With
+            Else
+                Dim ActiveDesignerhWnd As LongPtr
+                If TryFindFirstInterestingAccessWindow(ActiveDesignerhWnd) Then
+                    If ObjectTracker.TryAddItemFromhWnd(ActiveDesignerhWnd, Data) Then
+                        Logger.PrintDebug("Added Access object '" & Trim$(Data.OriginalName) & "' (Type " & Data.ObjectType & ") for the hWnd " & Hex(ActiveDesignerhWnd), CurrentComponentName, CurrentProcedureName)
+                    Else
+                        Logger.PrintError("Failed to add Access object for active designer hWnd: " & Hex(ActiveDesignerhWnd), CurrentComponentName, CurrentProcedureName)
+                    End If
+                Else
+                    Logger.PrintDebug("There are no open designer windows?", CurrentComponentName, CurrentProcedureName)
+                End If
+            End If
+        End If
+        
+        Return ObjectTracker.Count > 0
+    End Function
+End Module

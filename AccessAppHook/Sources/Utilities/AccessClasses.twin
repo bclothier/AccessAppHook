@@ -1,0 +1,49 @@
+' This module should only contain string constants representing Access win32 classes
+Private Module AccessClasses
+    ' Access Main Window class (the class of the Application.hWndAccessApp)
+    Public Const MainClass As string = "OMain"
+    
+    ' MDIClient is a direct child of the OMain window (the same window handle returned by Application.hWndAccessApp)
+    ' or by VBIDE's wndclass_desked_gsk window. 
+    Public Const MDIClientClass As String = "MDIClient"
+    
+    ' Those are direct children of the MDIClient window. The Z order is significant, so we can infer the active/tompost
+    ' window by getting the first child of the MDIClient window. Note that Access and VBIDE has their own MDIClient 
+    ' window so the child window must be gotten under the handle of the respective MDIClient window.
+
+    ' Neither table nor query class allow for custom captions so what we get in caption will be exactly the same as 
+    ' the programmatic name so it's safe to retrieve the table/query by the caption. 
+    Public Const TableClass As String = "OTable"
+    Public Const QueryClass As String = "OQry"
+
+    ' Both form and report classes may have a caption set that does not correspond to their programmatic names. To 
+    ' further complicate things, it is possible to have them open in normal view and still have design changes that
+    ' needs to be saved. It's unlikely but possible that a form/report may have caption set to a unrelated object
+    ' so retrieving Forms("<caption>") might not be safe. To avoid this, we should just enumerate the Forms/Reports
+    ' collection and comparing the hWnd property with the window to match them. 
+    Public Const FormClass As String = "OForm"
+    Public Const ReportClass As String = "OReport"
+    
+    ' To determine whether this is a data macro or a regular macro, we need to verify it's not WS_DISABLED and if so,
+    ' peek into the next sibling (e.g. 2nd child of the MDIClient window) and determine whether it's a table class 
+    ' and check if it has WS_DISABLED and the name of table in the caption is the same as the data macro's prefix 
+    ' (e.g. table "Table1" will have a data macro captioned "Table1 : After Insert :"). If all four conditions are true
+    ' then we are looking at a table data macro. Otherwise, it's most likely a regular macro.
+    Public Const ScriptClass As String = "OScript"
+    
+    ' The VBIDE is run as a independent window that is not a child nor owned by Access' windows. 
+    ' It may not exist if Access is opened but hasn't opened VBIDE. When VBIDE opens, it will 
+    ' exist in which case, we can determine if this particular instance of VBIDE is Access' by 
+    ' looking at the process ID which is the same between the 2 windows. Note: once it is created
+    ' it will remain for the lifetime of Access process, even if the user closes the VBIDE.
+    Public Const VBIDEClass As String = "wndclass_desked_gsk"
+    
+    ' The code pane window class
+    Public Const VBModuleClass As String = "VbaWindow"
+    
+    ' Designer window for VBA userform
+    Public Const VBUserFormClass As String = "DesignerWindow"
+    
+    ' All Save dialogs ( as well as other dialogs ) have the same atom identifer
+    Public Const SaveDialogClass As String = "#32770"
+End Module

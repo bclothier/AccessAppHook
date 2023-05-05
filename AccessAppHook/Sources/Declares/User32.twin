@@ -1,0 +1,509 @@
+Private Module User32
+    Public Const GWLP_WNDPROC As Long = -4
+    Public Const GWL_STYLE As Long = -16
+    
+    Public Const WS_DISABLED As Long = &H08000000&
+    
+    Public Const WM_HOTKEY As Long = &H0312&
+    Public Const WM_ENTERIDLE As Long = &H0121&
+    Public Const WM_COMMAND As Long = &H0111&
+    Public Const WM_CLOSE As Long = &H0010&
+    Public Const WM_DESTROY As Long = &H2&
+    Public Const WM_KEYDOWN As Long = &H0100&
+    Public Const WM_KEYUP As Long = &H0101&
+    Public Const WM_SYSKEYDOWN As Long = &H0104&
+    Public Const WM_SYSKEYUP As Long = &H0105&
+    Public Const WM_INITDIALOG As Long = &H0110&
+    Public Const WM_ENABLE As Long = &H000A&
+    Public Const WM_WINDOWPOSCHANGED As Long = &H0047&
+    
+    Public Const LB_GETCOUNT As Long = &H018B
+    Public Const LB_GETTEXTLEN As Long = &H018A
+    Public Const LB_GETTEXT As Long = &H0189
+    Public Const LB_GETSEL As Long = &H0187
+    
+    Public Const LB_OKAY As Long = &H0
+    Public Const LB_ERR As Long = -1
+    Public Const LB_ERRSPACE As Long = -2
+    
+    Public Const MOD_CONTROL As Integer = &H0002%
+
+    Public Const WH_KEYBOARD As Long = 2
+    Public Const WH_KEYBOARD_LL As Long = 13
+    Public Const WH_GETMESSAGE As Long = 3
+    Public Const WH_MSGFILTER As Long = -1
+    Public Const WH_CBT As Long = 5
+    Public Const WH_SYSMSGFILTER As Long = 6
+    
+    Public Const HC_ACTION  As Long = 0
+    Public Const HC_NOREMOVE  As Long = 3
+    
+    Public Const WM_PARENTNOTIFY As Long = &H0210&
+    Public Const WM_PARENTNOTIFY_CREATE As Integer = &H1%
+    Public Const WM_PARENTNOTIFY_DESTROY As Integer = &H2%
+  
+    ' Bits        Description
+    ' 0-15        The repeat count. The value is the number of times the keystroke is repeated as a result of the user's holding down the key.
+    ' 16-23        The scan code. The value depends on the OEM.
+    ' 24        Indicates whether the key is an extended key, such as a function key or a key on the numeric keypad. The value is 1 if the key is an extended key; otherwise, it is 0.
+    ' 25-28        Reserved.
+    ' 29        The context code. The value is 1 if the ALT key is down; otherwise, it is 0.
+    ' 30        The previous key state. The value is 1 if the key is down before the message is sent; it is 0 if the key is up.
+    ' 31        The transition state. The value is 0 if the key is being pressed and 1 if it is being released.    
+    '
+    ' NOTE: those assumes using C++ macros to get the high word  (e.g. Integer) which the lower byte has scan code, and high byte
+    ' has the flags.     
+    ' KF_EXTENDED 0x0100    Manipulates the extended key flag.
+    ' KF_DLGMODE  0x0800    Manipulates the dialog mode flag, which indicates whether a dialog box is active.
+    ' KF_MENUMODE 0x1000    Manipulates the menu mode flag, which indicates whether a menu is active.
+    ' KF_ALTDOWN  0x2000    Manipulates the context code flag.
+    ' KF_REPEAT   0x4000    Manipulates the previous key state flag.
+    ' KF_UP       0x8000    Manipulates the transition state flag. 
+        
+    Private Enum KeyboardEventFlags
+        KF_EXTENDED = &H1&
+        KF_DLGMODE = &H8&
+        KF_MENUMODE = &H10&
+        KF_ALTDOWN = &H20&
+        KF_REPEAT = &H40&
+        KF_UP = &H80&
+    End Enum
+    
+    Public Enum CBTProcCodes
+        HCBT_ACTIVATE = 5	    ' The system is about to activate a window.
+        HCBT_CLICKSKIPPED = 6	' The system has removed a mouse message from the system message queue. Upon receiving this hook code, a CBT application must install a WH_JOURNALPLAYBACK hook procedure in response to the mouse message.
+        HCBT_CREATEWND = 3	    ' A window is about to be created. The system calls the hook procedure before sending the WM_CREATE or WM_NCCREATE message to the window. If the hook procedure returns a nonzero value, the system destroys the window; the CreateWindow function returns NULL, but the WM_DESTROY message is not sent to the window. If the hook procedure returns zero, the window is created normally.
+                                ' At the time of the HCBT_CREATEWND notification, the window has been created, but its final size and position may not have been determined and its parent window may not have been established. It is possible to send messages to the newly created window, although it has not yet received WM_NCCREATE or WM_CREATE messages. It is also possible to change the position in the z-order of the newly created window by modifying the hwndInsertAfter member of the CBT_CREATEWND structure.
+        HCBT_DESTROYWND = 4	    ' A window is about to be destroyed.
+        HCBT_KEYSKIPPED = 7	    ' The system has removed a keyboard message from the system message queue. Upon receiving this hook code, a CBT application must install a WH_JOURNALPLAYBACK hook procedure in response to the keyboard message.
+        HCBT_MINMAX = 1	        ' A window is about to be minimized or maximized.
+        HCBT_MOVESIZE = 0	    ' A window is about to be moved or sized.
+        HCBT_QS = 2             ' The system has retrieved a WM_QUEUESYNC message from the system message queue.
+        HCBT_SETFOCUS = 9	    ' A window is about to receive the keyboard focus.
+        HCBT_SYSCOMMAND = 8     ' A system command is about to be carried out. This allows a CBT application to prevent task switching by means of hot keys.    
+    End Enum
+    
+    Public Enum ShowWindowFlags
+        SWP_DRAWFRAME = &H0020&         ' Draws a frame (defined in the window's class description) around the window. Same as the SWP_FRAMECHANGED flag.
+        SWP_FRAMECHANGED = &H0020&      ' Sends a WM_NCCALCSIZE message to the window, even if the window's size is not being changed. If this flag is not specified, WM_NCCALCSIZE is sent only when the window's size is being changed.
+        SWP_HIDEWINDOW = &H0080&        ' Hides the window.
+        SWP_NOACTIVATE = &H0010&        ' Does not activate the window. If this flag is not set, the window is activated and moved to the top of either the topmost or non-topmost group (depending on the setting of the hwndInsertAfter member).
+        SWP_NOCOPYBITS = &H0100&        ' Discards the entire contents of the client area. If this flag is not specified, the valid contents of the client area are saved and copied back into the client area after the window is sized or repositioned.
+        SWP_NOMOVE = &H0002&            ' Retains the current position (ignores the x and y members).
+        SWP_NOOWNERZORDER = &H0200&     ' Does not change the owner window's position in the Z order.
+        SWP_NOREDRAW = &H0008&          ' Does not redraw changes. If this flag is set, no repainting of any kind occurs. This applies to the client area, the nonclient area (including the title bar and scroll bars), and any part of the parent window uncovered as a result of the window being moved. When this flag is set, the application must explicitly invalidate or redraw any parts of the window and parent window that need redrawing.
+        SWP_NOREPOSITION = &H0200&      ' Does not change the owner window's position in the Z order. Same as the SWP_NOOWNERZORDER flag.
+        SWP_NOSENDCHANGING = &H0400&    ' Prevents the window from receiving the WM_WINDOWPOSCHANGING message.
+        SWP_NOSIZE = &H0001&            ' Retains the current size (ignores the cx and cy members).
+        SWP_NOZORDER = &H0004&          ' Retains the current Z order (ignores the hwndInsertAfter member).
+        SWP_SHOWWINDOW = &H0040&        ' Displays the window.    
+    End Enum
+    
+    ' typedef struct tagMSG {
+    '   HWND   hwnd;
+    '   UINT   message;
+    '   WPARAM wParam;
+    '   LPARAM lParam;
+    '   DWORD  time;
+    '   POINT  pt;
+    '   DWORD  lPrivate;
+    ' } MSG, *PMSG, *NPMSG, *LPMSG;
+    Public Type POINT
+        x As Long
+        y As Long
+    End Type
+    
+    Public Type MSG
+        hWnd As LongPtr
+        message As Long
+        wParam As LongPtr
+        lParam As LongPtr
+        time As Long
+        pt As POINT
+        lPrivate As Long
+    End Type
+    
+    ' typedef struct tagCREATESTRUCTW {
+    '   LPVOID    lpCreateParams;
+    '   HINSTANCE hInstance;
+    '   HMENU     hMenu;
+    '   HWND      hwndParent;
+    '   int       cy;
+    '   int       cx;
+    '   int       y;
+    '   int       x;
+    '   LONG      style;
+    '   LPCWSTR   lpszName;
+    '   LPCWSTR   lpszClass;
+    '   DWORD     dwExStyle;
+    ' } CREATESTRUCTW, *LPCREATESTRUCTW;    
+    Public Type CREATESTRUCTW
+        lpCreateParam As Longptr
+        hInstance As LongPtr
+        hMenu As LongPtr
+        hwndParent As LongPtr
+        cy As Long
+        cx As Long
+        y As Long
+        x As Long
+        style As Long
+        lpszName As LongPtr
+        lpszClass As LongPtr
+        dwExStyle As Long
+    End Type
+    
+    ' typedef struct tagCBT_CREATEWNDW {
+    '   struct tagCREATESTRUCTW *lpcs;
+    '   HWND                    hwndInsertAfter;
+    ' } CBT_CREATEWNDW, *LPCBT_CREATEWNDW;
+    Public Type CBT_CREATEWNDW
+    	lcps As LongPtr
+        hwndInsertAfter As LongPtr
+    End Type
+
+    ' typedef struct tagWINDOWPOS {
+    '   HWND hwnd;
+    '   HWND hwndInsertAfter;
+    '   int  x;
+    '   int  y;
+    '   int  cx;
+    '   int  cy;
+    '   UINT flags;    
+    ' } WINDOWPOS, *LPWINDOWPOS, *PWINDOWPOS;
+    Public Type WINDOWPOS
+        hWnd As Longptr
+        hWndInsertAfter As LongPtr
+        x As Long
+        y As Long
+        cx As Long
+        cy As Long
+        flags As ShowWindowFlags
+    End Type
+        
+    ' LONG_PTR GetWindowLongPtrW(
+    '   [in] HWND hWnd,
+    '   [in] int  nIndex
+    ' ); 
+    Public DeclareWide PtrSafe Function GetWindowLongPtrW _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr, _
+        ByVal nIndex As Long _ 
+    ) As LongPtr
+    
+    ' LONG_PTR SetWindowLongPtrW(
+    '   [in] HWND     hWnd,
+    '   [in] int      nIndex,
+    '   [in] LONG_PTR dwNewLong
+    ' );
+    Public DeclareWide PtrSafe Function SetWindowLongPtrW _
+    Lib "User32.dll" ( _
+        ByVal hHwnd As LongPtr, _
+        ByVal nIndex As Long, _ 
+        ByVal dwNewLong As LongPtr _
+    ) As LongPtr
+    
+    ' LRESULT CallWindowProcW(
+    '   [in] WNDPROC lpPrevWndFunc,
+    '   [in] HWND    hWnd,
+    '   [in] UINT    Msg,
+    '   [in] WPARAM  wParam,
+    '   [in] LPARAM  lParam
+    ' );    
+    Public DeclareWide PtrSafe Function CallWindowProcW _
+    Lib "User32.dll" ( _ 
+        ByVal lpPrevWndFunc As LongPtr, _ 
+        ByVal hWnd As LongPtr, _ 
+        ByVal Msg As Long, _ 
+        ByVal wParam As LongPtr, _ 
+        ByVal lParam As LongPtr _ 
+    ) As LongPtr
+    
+    ' LRESULT DefWindowProcW(
+    '   [in] HWND   hWnd,
+    '   [in] UINT   Msg,
+    '   [in] WPARAM wParam,
+    '   [in] LPARAM lParam
+    ' );
+    Public DeclareWide PtrSafe Function DefWindowProcW _
+    Lib "User32.dll" ( _
+        ByVal hWnd As LongPtr, _ 
+        ByVal Msg As Long, _
+        ByVal wParam As LongPtr, _ 
+        ByVal lParam As LongPtr _
+    ) As LongPtr
+    
+    ' BOOL RegisterHotKey(
+    '   [in, optional] HWND hWnd,
+    '   [in]           int  id,
+    '   [in]           UINT fsModifiers,
+    '   [in]           UINT vk
+    ' );    
+    Public DeclareWide PtrSafe Function RegisterHotKey _
+    Lib "User32.dll" ( _
+        ByVal hWnd As LongPtr, _ 
+        ByVal id As Long, _
+        ByVal fsModifiers As Long, _
+        ByVal vk As Long _
+    ) As Long
+    
+    ' BOOL UnregisterHotKey(
+    '   [in, optional] HWND hWnd,
+    '   [in]           int  id
+    ' );
+    Public DeclareWide PtrSafe Function UnregisterHotKey _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr, _ 
+        ByVal id As Long _
+    ) As Long
+    
+    Public Declare PtrSafe Function SetTimer _
+    Lib "User32.dll" ( _ 
+        ByVal hwnd As LongPtr, _ 
+        ByVal nIDEvent As LongPtr, _ 
+        ByVal uElapse As Long, _ 
+        ByVal lpTimerFunc As LongPtr _
+    ) As LongPtr
+    
+    Public Declare PtrSafe Function KillTimer _
+    Lib "User32.dll" ( _
+        ByVal hwnd As LongPtr, _ 
+        ByVal nIDEvent As LongPtr _
+    ) As Long
+  
+    ' BOOL SetUserObjectInformationW(
+    '   [in] HANDLE hObj,
+    '   [in] int    nIndex,
+    '   [in] PVOID  pvInfo,
+    '   [in] DWORD  nLength
+    ' );
+    Public Enum SetUserObjectInformationFlags
+        UOI_FLAGS = 1                               'Sets the object's handle flags. The pvInfo parameter must point to a USEROBJECTFLAGS structure.
+        UOI_TIMERPROC_EXCEPTION_SUPPRESSION = 7     'Sets the exception handling behavior when calling TimerProc. hObj must be the process handle returned by the GetCurrentProcess function.
+    End Enum
+    Public Declare PtrSafe Function SetUserObjectInformationW _
+    Lib "User32.dll" ( _ 
+        ByVal hObj As LongPtr, _ 
+        ByVal nIndex As SetUserObjectInformationFlags, _ 
+        ByVal pvInfo As LongPtr, _ 
+        ByVal nLength As Long _ 
+    ) As Long
+    
+    ' BOOL EnumChildWindows(
+    '   [in, optional] HWND        hWndParent,
+    '   [in]           WNDENUMPROC lpEnumFunc,
+    '   [in]           LPARAM      lParam
+    ' );   
+    ' 
+    ' BOOL CALLBACK EnumChildProc(
+    '   _In_ HWND   hwnd,
+    '   _In_ LPARAM lParam
+    ' );        
+    Public DeclareWide PtrSafe Function EnumChildWindows _ 
+    Lib "User32.dll" ( _ 
+        ByVal hWndParent As LongPtr, _ 
+        ByVal lpenumFunc As LongPtr, _ 
+        ByVal lParam As LongPtr _
+    ) As Long
+  
+    ' HWND GetWindow(
+    '   [in] HWND hWnd,
+    '   [in] UINT uCmd
+    ' );
+    Public Enum GetWindowCmds
+        GW_CHILD = 5        ' The retrieved handle identifies the child window at the top of the Z order, if the specified window is a parent window; otherwise, the retrieved handle is NULL. The function examines only child windows of the specified window. It does not examine descendant windows.
+        GW_ENABLEDPOPUP = 6 ' The retrieved handle identifies the enabled popup window owned by the specified window (the search uses the first such window found using GW_HWNDNEXT); otherwise, if there are no enabled popup windows, the retrieved handle is that of the specified window.
+        GW_HWNDFIRST = 0    ' The retrieved handle identifies the window of the same type that is highest in the Z order.
+                            ' If the specified window is a topmost window, the handle identifies a topmost window. If the specified window is a top-level window, the handle identifies a top-level window. If the specified window is a child window, the handle identifies a sibling window.
+        GW_HWNDLAST = 1     ' The retrieved handle identifies the window of the same type that is lowest in the Z order.
+                            ' If the specified window is a topmost window, the handle identifies a topmost window. If the specified window is a top-level window, the handle identifies a top-level window. If the specified window is a child window, the handle identifies a sibling window.
+        GW_HWNDNEXT = 2     ' The retrieved handle identifies the window below the specified window in the Z order.
+                            ' If the specified window is a topmost window, the handle identifies a topmost window. If the specified window is a top-level window, the handle identifies a top-level window. If the specified window is a child window, the handle identifies a sibling window.
+        GW_HWNDPREV = 3     ' The retrieved handle identifies the window above the specified window in the Z order.
+                            ' If the specified window is a topmost window, the handle identifies a topmost window. If the specified window is a top-level window, the handle identifies a top-level window. If the specified window is a child window, the handle identifies a sibling window.
+        GW_OWNER = 4        ' The retrieved handle identifies the specified window's owner window, if any. For more information, see Owned Windows.
+    End Enum
+    
+    Public DeclareWide PtrSafe Function GetWindow _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr, _ 
+        ByVal uCmd As GetWindowCmds _
+    ) As LongPtr
+    
+    ' HWND FindWindowExW(
+    '   [in, optional] HWND   hWndParent,
+    '   [in, optional] HWND   hWndChildAfter,
+    '   [in, optional] LPCSTR lpszClass,
+    '   [in, optional] LPCSTR lpszWindow
+    ' );  
+    Public DeclareWide PtrSafe Function FindWindowExW _
+    Lib "User32.dll" ( _ 
+        ByVal hWndParent As LongPtr, _ 
+        ByVal hWndChildAfter As LongPtr, _ 
+        ByVal lpszClass As String, _ 
+        ByVal lpszWindow As String _ 
+    ) As LongPtr
+  
+    ' int GetClassName(
+    '   [in]  HWND   hWnd,
+    '   [out] LPTSTR lpClassName,
+    '   [in]  int    nMaxCount
+    ' );
+    Public DeclareWide PtrSafe Function GetClassNameW _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr, _ 
+        ByVal lpClassName As String, _ 
+        ByVal nMaxCount As Long _ 
+    ) As Long
+
+    ' int GetWindowTextW(
+    '   [in]  HWND   hWnd,
+    '   [out] LPWSTR lpString,
+    '   [in]  int    nMaxCount
+    ' );
+    Public DeclareWide PtrSafe Function GetWindowTextW _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr, _ 
+        ByVal lpString As String, _ 
+        ByVal nMaxCount As Long _ 
+    ) As Long
+
+    ' DWORD GetWindowThreadProcessId(
+    '   [in]            HWND    hWnd,
+    '   [out, optional] LPDWORD lpdwProcessId
+    ' );
+    Public DeclareWide PtrSafe Function GetWindowThreadProcessId _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr, _ 
+        ByRef lpdwProcessId As Long _ 
+    ) As Long
+    
+    ' BOOL IsWindow(
+    '   [in, optional] HWND hWnd
+    ' );    
+    Public DeclareWide PtrSafe Function IsWindow _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr _ 
+    ) As Long
+    
+    ' HWND GetDesktopWindow();
+    Public DeclareWide PtrSafe Function GetDesktopWindow _
+    Lib "User32.dll" () As LongPtr
+    
+    ' HWND GetForegroundWindow();
+    Public DeclareWide PtrSafe Function GetForegroundWindow _
+    Lib "User32.dll" () As LongPtr
+    
+    ' HWND GetParent(
+    '   [in] HWND hWnd
+    ' );    
+    Public DeclareWide PtrSafe Function GetParent _
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr _
+    ) As LongPtr
+    
+    ' HWND GetAncestor(
+    '   [in] HWND hwnd,
+    '   [in] UINT gaFlags
+    ' );    
+    Public Enum GetAncestorFlags
+        GA_PARENT = 1&
+        GA_ROOT = 2&
+        GA_ROOTOWNER = 3&
+    End Enum
+    Public Declare PtrSafe Function GetAncestor _ 
+    Lib "User32.dll" ( _
+        ByVal hWnd As LongPtr, _
+        ByVal gaFlags As GetAncestorFlags _
+    ) As LongPtr
+    
+    ' typedef struct tagKBDLLHOOKSTRUCT {
+    '   DWORD     vkCode;
+    '   DWORD     scanCode;
+    '   DWORD     flags;
+    '   DWORD     time;
+    '   ULONG_PTR dwExtraInfo;
+    ' } KBDLLHOOKSTRUCT, *LPKBDLLHOOKSTRUCT, *PKBDLLHOOKSTRUCT; 
+    Public Type KBDLLHOOKSTRUCT
+        vkCode As Long
+        scanCode As Long
+        flags As Long
+        time As Long
+        dwExtraInfo As LongPtr
+    End Type
+    
+    ' HHOOK SetWindowsHookExW(
+    '   [in] int       idHook,
+    '   [in] HOOKPROC  lpfn,
+    '   [in] HINSTANCE hmod,
+    '   [in] DWORD     dwThreadId
+    ' );    
+    Public DeclareWide PtrSafe Function SetWindowsHookExW _
+    Lib "User32.dll" ( _ 
+        ByVal idHook As Long, _ 
+        ByVal lpfn As LongPtr, _ 
+        ByVal hmod As LongPtr, _ 
+        ByVal dwThreadId As Long _
+    ) As LongPtr
+    
+    ' LRESULT CallNextHookEx(
+    '   [in, optional] HHOOK  hhk,
+    '   [in]           int    nCode,
+    '   [in]           WPARAM wParam,
+    '   [in]           LPARAM lParam
+    ' );
+    Public DeclareWide PtrSafe Function CallNextHookEx _
+    Lib "User32.dll" ( _ 
+        ByVal hhk As LongPtr, _ 
+        ByVal nCode As Long, _ 
+        ByVal wParam As LongPtr, _ 
+        ByVal lParam As LongPtr _
+    ) As LongPtr
+
+    ' BOOL UnhookWindowsHookEx(
+    '   [in] HHOOK hhk
+    ' );
+    Public DeclareWide PtrSafe Function UnhookWindowsHookEx _
+    Lib "User32.dll" ( _ 
+        ByVal hhk As LongPtr _
+    ) As Long
+    
+    ' SHORT GetKeyState(
+    '   [in] int nVirtKey
+    ' );    
+    Public DeclareWide PtrSafe Function GetKeyState _
+    Lib "User32.dll" ( _
+        ByVal nVirtKey As Integer _
+    ) As Integer
+    
+    ' SHORT GetAsyncKeyState(
+    '   [in] int vKey
+    ' );    
+    Public DeclareWide PtrSafe Function GetAsyncKeyState _ 
+    Lib "User32.dll" ( _ 
+        ByVal vKey As Long _ 
+    ) As Integer
+    
+    ' int GetDlgCtrlID(
+    '   [in] HWND hWnd
+    ' );    
+    Public DeclareWide PtrSafe Function GetDlgCtrlID _ 
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr _ 
+    ) As Long
+        
+    ' LRESULT SendDlgItemMessageW(
+    '   [in] HWND   hDlg,
+    '   [in] int    nIDDlgItem,
+    '   [in] UINT   Msg,
+    '   [in] WPARAM wParam,
+    '   [in] LPARAM lParam
+    ' );    
+    Public DeclareWide PtrSafe Function SendDlgItemMessageW _ 
+    Lib "User32.dll" ( _ 
+        ByVal hWnd As LongPtr, _ 
+        ByVal nIDDlgItem As Long, _ 
+        ByVal Msg As Long, _ 
+        ByVal wParam As LongPtr, _ 
+        ByVal lParam As LongPtr _ 
+    ) As LongPtr
+End Module

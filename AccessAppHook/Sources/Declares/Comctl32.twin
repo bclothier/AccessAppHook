@@ -1,0 +1,41 @@
+Private Module Comctl32
+    ' BOOL SetWindowSubclass(
+    '   [in] HWND         hWnd,
+    '   [in] SUBCLASSPROC pfnSubclass,
+    '   [in] UINT_PTR     uIdSubclass,
+    '   [in] DWORD_PTR    dwRefData
+    ' );    
+    Public DeclareWide PtrSafe Function SetWindowSubclass _
+    Lib "Comctl32.dll" ( _
+        ByVal hWnd As LongPtr, _ 
+        ByVal pfnSubclass As LongPtr, _
+        ByVal uIdSubclass As LongPtr, _ 
+        ByRef dwRefData As Long _
+    ) As Long
+    
+    ' LRESULT DefSubclassProc(
+    '   [in] HWND   hWnd,
+    '   [in] UINT   uMsg,
+    '   [in] WPARAM wParam,
+    '   [in] LPARAM lParam
+    ' ); 
+    Public DeclareWide PtrSafe Function DefSubclassProc _
+    Lib "Comctl32.dll" ( _
+        ByVal hWnd As LongPtr, _ 
+        ByVal uMsg As Long, _
+        ByVal wParam As LongPtr, _ 
+        ByVal lParam As LongPtr _
+    ) As LongPtr
+    
+    ' BOOL RemoveWindowSubclass(
+    '   [in] HWND         hWnd,
+    '   [in] SUBCLASSPROC pfnSubclass,
+    '   [in] UINT_PTR     uIdSubclass
+    ' );
+    Public DeclareWide PtrSafe Function RemoveWindowSubclass _
+    Lib "Comctl32.dll" ( _
+        ByVal hWnd As LongPtr, _ 
+        ByVal pfnSubclass As LongPtr, _
+        ByVal uIdSubclass As LongPtr _
+    ) As Long
+End Module

@@ -1,0 +1,9 @@
+Private Module Oleacc
+    ' HANDLE WINAPI GetProcessHandleFromHwnd(
+    '   _In_ HWND hwnd
+    ' );
+    Public DeclareWide PtrSafe Function GetProcessHandleFromHwnd _
+    Lib "Oleacc.dll" ( _ 
+        ByVal hWnd As LongPtr _ 
+    ) As LongPtr
+End Module

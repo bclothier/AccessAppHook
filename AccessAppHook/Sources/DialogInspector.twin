@@ -1,0 +1,578 @@
+' NOTE: those resources are provided only for reference. The actual dialog may have different layouts, captions and styles.
+' However, the controls' ID and class should be stable and be the same for various versions of Access (at least since 2007 
+' if not earlier). Access can use in total 4 different dialogs when performing save actions. One is a standard Windows
+' messagebox and the other 3 are custom dialogs. Though those 3 dialogs are customized, they still use standard control ID
+' to indicate yes/no/cancel actions and we can use the control ID from WM_COMMAND message to determine what user chose to do.
+' 
+' In order to determine the type of the dialog, we must inspect the child controls and inter the template they came from
+' because they do not have the resource ID available. To avoid localization issues, we should avoid parsing strings from 
+' captions but instead rely on IDs and class names which will not change among different installations.
+'
+' Used when saving an existing object usually in response to a close action, represented as Yes/No/Cancel messagebox.
+' ?AccessError(8050)
+' Do you want to save changes to the design of |?@@@13@@@2
+'
+'
+' Used when saving new objects, providing a name for the object
+'
+' 5030 DIALOGEX 11, 28, 219, 49
+' STYLE DS_SETFONT | DS_MODALFRAME | DS_CONTEXTHELP | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+' CAPTION "Save As"
+' LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+' FONT 8, "Tahoma"
+' {
+'    CONTROL "DAL=on", 2120, STATIC, SS_LEFT | WS_CHILD | WS_GROUP, 0, 0, 0, 0 
+'    CONTROL "", 2021, STATIC, SS_LEFT | WS_CHILD | WS_VISIBLE, 7, 6, 150, 9 
+'    CONTROL "", 2020, "RichEdit20W", ES_LEFT | ES_AUTOHSCROLL | WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 7, 16, 150, 12 , 0, -4558
+'    CONTROL "Make &Replicable", 3227, BUTTON, BS_AUTOCHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 7, 32, 90, 10 , 0, -3551
+'    CONTROL "OK", 1, BUTTON, BS_DEFPUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 163, 7, 50, 14 , 0, -3584
+'    CONTROL "Cancel", 2, BUTTON, BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 163, 24, 50, 14 , 0, -3389
+' }
+'
+'
+' Used whenever there are multiple dirty objects
+'
+' 5140 DIALOGEX 0, 0, 244, 65
+' STYLE DS_SETFONT | DS_MODALFRAME | DS_CONTEXTHELP | WS_POPUP | WS_CAPTION | WS_SYSMENU
+' CAPTION "Save"
+' LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+' FONT 8, "Tahoma"
+' {
+'    CONTROL "DAL=on", 2120, STATIC, SS_LEFT | WS_CHILD | WS_GROUP, 0, 0, 0, 0 
+'    CONTROL "&Yes", 1, BUTTON, BS_DEFPUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 183, 11, 50, 14 , 0, -3584
+'    CONTROL "&No to All", 7, BUTTON, BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 183, 28, 50, 14 
+'    CONTROL "Cancel", 2, BUTTON, BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 183, 45, 50, 14 , 0, -3389
+'    CONTROL "Save changes to the following objects?", 5271, STATIC, SS_LEFT | WS_CHILD | WS_VISIBLE | WS_GROUP, 7, 9, 156, 14 
+'    CONTROL "", 5142, LISTBOX, LBS_STANDARD | LBS_MULTIPLESEL | LBS_OWNERDRAWVARIABLE | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 9, 24, 160, 35 
+' }
+'
+'
+' Used whenever executing "Save Object As" action
+'
+' 5146 DIALOGEX 11, 28, 230, 80
+' STYLE DS_SETFONT | DS_MODALFRAME | DS_CONTEXTHELP | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+' CAPTION "Save As"
+' LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+' FONT 8, "Tahoma"
+' {
+'    CONTROL "DAL=on", 2120, STATIC, SS_LEFT | WS_CHILD | WS_GROUP, 0, 0, 0, 0 
+'    CONTROL "", 3221, "RichEdit20W", ES_LEFT | ES_READONLY | WS_CHILD | WS_VISIBLE, 7, 7, 155, 12 
+'    CONTROL "", 3223, "RichEdit20W", ES_LEFT | ES_AUTOHSCROLL | WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 7, 20, 155, 12 , 0, -3479
+'    CONTROL "&As", 3220, STATIC, SS_LEFT | WS_CHILD | WS_VISIBLE | WS_GROUP, 7, 36, 40, 12 
+'    CONTROL "", 3222, "REComboBox20W", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | 0x43, 7, 48, 155, 60 
+'    CONTROL "Make &Replicable", 3227, BUTTON, BS_AUTOCHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 7, 62, 130, 10 , 0, -3551
+'    CONTROL "OK", 1, BUTTON, BS_DEFPUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 172, 7, 50, 14 , 0, -3584
+'    CONTROL "Cancel", 2, BUTTON, BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 172, 24, 50, 14 , 0, -3389
+' }
+'
+' NOTE: Table data macros are a special case. They use a Yes/No/Cancel messagebox that is not parameterized with caption:
+'       Do you want to save the changes made to the macro and update the property?
+' This caption is not found in AccessError(). Because the table data macros disable other panes, this probably is best
+' handled as lookup for a Yes/No/Cancel dialog, and instead of looking at captions, looking at the windows on MDI client. 
+Private Module DialogInspector
+    Option Compare Text
+    
+    Public Enum AccessSaveDialogTypes
+        Unknown             ' Not a dialog we recognize and shouldn't hook.
+        SaveYesNoCancel     ' A standard messagebox with yes/no/cancel buttons.
+        SaveNew             ' Access dialog (ID 5030) with a textbox to put in name with ok/cancel buttons.
+        SaveAs              ' Access dialog (ID 5146) with a textbox and a combobox to put in name and change object type with ok/cancel buttons.
+        SaveMultiple        ' Access dialog (ID 5140) with a listbox of objects to be saved with yes/no/cancel buttons. Note: "no" button is labeled as "No To All" but has same ID as a No. Also, "yes" button is given a ID of 0x1 (aka vbOk), NOT 0x6 (aka vbYes)
+    End Enum
+    
+    Public Enum AccessSaveDialogResponses
+        Unknown             ' We can receive WM_COMMAND messages that are not related to save operrations.
+        ObjectNotSaved
+        ObjectSaved
+        SaveCancelled
+    End Enum
+    
+    Private Type DialogControls
+        DalStatic As LongPtr
+        OkButton As LongPtr
+        CancelButton As LongPtr
+        YesButton As LongPtr
+        NoButton As LongPtr
+        EditTextBox As LongPtr
+        ObjectTypeComboBox As LongPtr
+        ObjectListBox As LongPtr
+        LabelStatic As LongPtr
+        PromptStatic As LongPtr
+    End Type
+
+    Public Type TState
+        ParentDialoghWnd As LongPtr
+        DialoghWnd As LongPtr
+    	DialogType As AccessSaveDialogTypes
+        OriginalObjectTypeText As String ' Cached for comparison with user's selection change
+        ObjectData As ObjectData
+        DialogControls As DialogControls
+    End Type
+    Private This As TState
+    
+    Private DalId As Long = 2120
+    Private ObjectLabelId As Long = 2021
+    Private NewObjectNameTextBoxId As Long = 2020
+    Private SaveAsNameTextBoxId As Long = 3223
+    Private ObjectTypeComboBoxId As Long = 3222
+    Private ObjectListBoxId As Long = 5142
+    Private PromptId As Long = 4001
+    Private MsoUnistatId As Long = 207 'Present on Yes/No/Cancel dialog only
+        
+    Private StaticClass As String = "Static"
+    Private ButtonClass As String = "Button"
+    Private TextBoxClass As String = "RichEdit20W"
+    Private ComboBoxClass As String = "REComboBox20W"
+    Private ListBoxClass As String = "ListBox"
+    Private AccessibleClass As string = "MSOUNISTAT" 'Present on Yes/No/Cancel dialog only
+    
+    ' Call this only when dialog is ready to show. If it's called too early, the dialog may not be finished
+    ' drawing its controls and therefore will give incorrect results. Use WM_WINDOWPOSCHANGED message with
+    ' ShowWindowFlags.SWP_SHOWWINDOW flag set to call this. This way, we can enumerate all child controls 
+    ' and after enumerating them, make our determination of the type of dialog based on the child controls.
+    Public Function IdentifyDialog(DialoghWnd As LongPtr) As AccessSaveDialogTypes
+        On Error GoTo ErrHandler
+        
+        Dim dlgControls As DialogControls
+        Dim ChildhWnd As LongPtr = User32.GetWindow(DialoghWnd, GetWindowCmds.GW_CHILD)
+        
+        Do Until ChildhWnd = 0
+            'Logger.PrintDebug "  Control " & Hex(ChildhWnd) & "; Id: " & User32.GetDlgCtrlID(ChildhWnd) & ", Class: " & GetClassName(ChildhWnd) & " Caption: " & GetCaption(ChildhWnd), CurrentComponentName, CurrentProcedureName
+            Dim DlgId As Long = User32.GetDlgCtrlID(ChildhWnd)
+            Dim ClassName As String = GetClassName(ChildhWnd)
+            Select Case True
+                Case DlgId = vbOK AndAlso ClassName = ButtonClass
+                    dlgControls.OkButton = ChildhWnd
+                Case DlgId = vbCancel AndAlso ClassName = ButtonClass
+                    dlgControls.CancelButton = ChildhWnd
+                Case DlgId = vbYes AndAlso ClassName = ButtonClass
+                    dlgControls.YesButton = ChildhWnd
+                Case DlgId = vbNo AndAlso ClassName = ButtonClass
+                    dlgControls.NoButton = ChildhWnd
+                Case DlgId = DalId AndAlso ClassName = StaticClass
+                    dlgControls.DalStatic = ChildhWnd
+                Case DlgId = ObjectTypeComboBoxId AndAlso ClassName = ComboBoxClass
+                    dlgControls.ObjectTypeComboBox = ChildhWnd
+                Case DlgId = ObjectListBoxId AndAlso ClassName = ListBoxClass
+                    dlgControls.ObjectListBox = ChildhWnd
+                Case (DlgId = NewObjectNameTextBoxId OrElse DlgId = SaveAsNameTextBoxId) AndAlso ClassName = TextBoxClass
+                    dlgControls.EditTextBox = ChildhWnd
+                Case DlgId = ObjectLabelId AndAlso ClassName = StaticClass
+                    dlgControls.LabelStatic = ChildhWnd
+                Case DlgId = PromptId AndAlso ClassName = StaticClass
+                    dlgControls.PromptStatic = ChildhWnd
+            End Select
+            ChildhWnd = User32.GetWindow(ChildhWnd, GetWindowCmds.GW_HWNDNEXT)
+        Loop
+        
+        Dim TempObjectType As String
+        Dim TempObjectName As String
+                
+        If dlgControls.DalStatic Then
+            ' It's one of Access custom dialogs
+            If dlgControls.ObjectListBox _
+            AndAlso dlgControls.OkButton _ 
+            AndAlso dlgControls.NoButton _ 
+            AndAlso dlgControls.CancelButton Then
+                'It's a multiple selection listbox Save dialog
+                UpdateState(DialoghWnd, AccessSaveDialogTypes.SaveMultiple, dlgControls, vbNullString, vbNullString)
+                Return This.DialogType
+            ElseIf dlgControls.ObjectTypeComboBox _ 
+            AndAlso dlgControls.EditTextBox _ 
+            AndAlso dlgControls.OkButton _ 
+            AndAlso dlgControls.CancelButton Then
+                'It's a save object as dialog (with a dropdown to change object type)
+                TempObjectType = GetCaption(dlgControls.ObjectTypeComboBox)
+                TempObjectName = GetCaption(dlgControls.EditTextBox)
+                UpdateState(DialoghWnd, AccessSaveDialogTypes.SaveAs, dlgControls, TempObjectType, TempObjectName)
+                Return This.DialogType
+            ElseIf dlgControls.EditTextBox _ 
+            AndAlso dlgControls.OkButton _ 
+            AndAlso dlgControls.CancelButton _
+            AndAlso dlgControls.LabelStatic Then
+                'It's a save as dialog (for new objects)
+                If TryExtractObjectTypePrompt(GetCaption(dlgControls.LabelStatic), TempObjectType) Then
+                    TempObjectName = GetCaption(dlgControls.EditTextBox)
+                    UpdateState(DialoghWnd, AccessSaveDialogTypes.SaveNew, dlgControls, TempObjectType, TempObjectName)
+                    Return This.DialogType
+                End If
+            End If
+        Else
+            If dlgControls.PromptStatic _
+            AndAlso dlgControls.YesButton _ 
+            AndAlso dlgControls.NoButton _ 
+            AndAlso dlgControls.CancelButton Then
+                'It's a confirmation dialog asking to save object
+                If TryExtractYesNoCancelPrompt(GetCaption(dlgControls.PromptStatic), TempObjectType, TempObjectName) Then
+                    UpdateState(DialoghWnd, AccessSaveDialogTypes.SaveYesNoCancel, dlgControls, TempObjectType, TempObjectName)
+                    Return This.DialogType
+                End If
+            End If
+        End If
+        
+        If This.DialogType = AccessSaveDialogTypes.Unknown Then
+            Logger.PrintDebug "Cannot identify dialog with hwnd " & Hex(DialoghWnd), CurrentComponentName, CurrentProcedureName
+        End If
+        
+    ExitProc:
+        Return AccessSaveDialogTypes.Unknown
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    Public Function ProcessDialogResponse(DialoghWnd As LongPtr, wParam As LongPtr, lParam As LongPtr) As AccessSaveDialogResponses
+        On Error GoTo ErrHandler
+        
+        If This.DialoghWnd = DialoghWnd Then
+            Dim Response As AccessSaveDialogResponses
+            Dim CancelSave As Boolean
+            Dim CommandId As Integer = LoWord(wParam)
+            
+            Select Case True
+                Case lParam = 0 AndAlso (CommandId = vbOK OrElse CommandId = vbYes), _
+                     CommandId = vbOK AndAlso lParam = This.DialogControls.OkButton, _
+                     CommandId = vbYes AndAlso lParam = This.DialogControls.YesButton
+                    Logger.PrintDebug "Processing response as object saved", CurrentComponentName, CurrentProcedureName
+                    Response = AccessSaveDialogResponses.ObjectSaved
+                Case lParam = 0 AndAlso CommandId = vbNo, _ 
+                     CommandId = vbNo AndAlso lParam = This.DialogControls.NoButton
+                    Logger.PrintDebug "Processing response as object NOT saved", CurrentComponentName, CurrentProcedureName
+                    Response = AccessSaveDialogResponses.ObjectNotSaved
+                    CancelSave = True
+                Case lParam = 0 AndAlso CommandId = vbCancel, _
+                     CommandId = vbCancel AndAlso lParam = This.DialogControls.CancelButton
+                    Logger.PrintDebug "Processing response as object save cancelled", CurrentComponentName, CurrentProcedureName
+                    Response = AccessSaveDialogResponses.SaveCancelled
+                    CancelSave = True
+                Case Else
+                    Return AccessSaveDialogResponses.Unknown
+            End Select
+            
+            If CancelSave = False Then
+                Select Case This.DialogType
+                    Case AccessSaveDialogTypes.SaveYesNoCancel
+                        ' No changes to the name or type
+                    Case AccessSaveDialogTypes.SaveNew
+                        This.ObjectData.NewName = GetCaption(This.DialogControls.EditTextBox)
+                        ' If This.ObjectData.ObjectType = -2 Then
+                        '     Logger.PrintDebug "Unknown object type for object '" & This.DialogControls.EditTextBox & "', identifying it now", CurrentComponentName, CurrentProcedureName
+                        '     Dim ObjectTypeString As String
+                        '     If TryExtractObjectTypePrompt(GetCaption(This.DialogControls.LabelStatic), ObjectTypeString) Then
+                        '         If TryConvertObjectTypeStringToObjectTypeId(ObjectTypeString, This.ObjectData.NewObjectType) = False Then
+                        '             Logger.PrintError "Unable to identify object type for given input '" & GetCaption(This.DialogControls.LabelStatic) & "' for object '" & GetCaption(This.DialogControls.EditTextBox) & "'", CurrentComponentName, CurrentProcedureName
+                        '         End If
+                        '     Else
+                        '         Logger.PrintError "Unable to extract object type string for given input '" & GetCaption(This.DialogControls.LabelStatic) & "' for object '" & GetCaption(This.DialogControls.EditTextBox) & "'", CurrentComponentName, CurrentProcedureName
+                        '     End If
+                        ' End If
+                    Case AccessSaveDialogTypes.SaveAs
+                        This.ObjectData.NewName = GetCaption(This.DialogControls.EditTextBox)
+                        If TryConvertObjectTypeStringToObjectTypeId(GetCaption(This.DialogControls.ObjectTypeComboBox), This.ObjectData.NewObjectType) = False Then
+                            Logger.PrintError "Unable to identify object type for given input '" & GetCaption(This.DialogControls.ObjectTypeComboBox) & "' for object '" & GetCaption(This.DialogControls.EditTextBox) & "'", CurrentComponentName, CurrentProcedureName
+                        End If
+                    Case AccessSaveDialogTypes.SaveMultiple
+                        ' Because there's multiple items for this dialog type, we proess it differently
+                        ' and exit earlier. 
+                        If CommandId = vbOK AndAlso lParam = This.DialogControls.OkButton Then
+                            ProcessListBoxSelection
+                            Return AccessSaveDialogResponses.ObjectSaved
+                        ElseIf CommandId = vbNo AndAlso lParam = This.DialogControls.NoButton Then
+                            CancelSave = True
+                            Return AccessSaveDialogResponses.ObjectNotSaved
+                        ElseIf CommandId = vbCancel AndAlso lParam = This.DialogControls.CancelButton Then
+                            CancelSave = True
+                            Return AccessSaveDialogResponses.SaveCancelled
+                        Else
+                            Return AccessSaveDialogResponses.Unknown
+                        End If
+                End Select
+            End If
+            
+            If Response <> AccessSaveDialogResponses.SaveCancelled Then
+                Logger.PrintDebug "Updating object data in response to hWnd: " & Hex(DialoghWnd) & " with wParam: " & Hex(wParam) & " and lParam: " & Hex(lParam) & " using response: " & Response, CurrentComponentName, CurrentProcedureName
+                Logger.PrintDebug "Going to update object data for object '" & Trim$(This.ObjectData.OriginalName) & "' (Type " & This.ObjectData.ObjectType & ")", CurrentComponentName, CurrentProcedureName
+                If ObjectTracker.UpdateItem(This.ObjectData.Index, CancelSave, This.ObjectData.NewObjectType, This.ObjectData.NewName) Then
+                    Logger.PrintDebug "Updated object data for object '" & Trim$(This.ObjectData.OriginalName) & "' (Type " & This.ObjectData.ObjectType & ")", CurrentComponentName, CurrentProcedureName
+                Else
+                    Logger.PrintError "Unable to update object data for object '" & Trim$(This.ObjectData.OriginalName) & "' (Type " & This.ObjectData.ObjectType & ")", CurrentComponentName, CurrentProcedureName
+                    Return AccessSaveDialogResponses.Unknown
+                End If
+            End If
+                
+            Return Response
+        ElseIf This.DialoghWnd Then
+            ' We don't care if the This.DialoghWnd is zero but we do care if it's not the same hWnd and we are somehow
+            ' still receiving messages from unrelated hWnd.
+            Logger.PrintDebug "Was given hwnd " & Hex(DialoghWnd) & " but was expecting hwnd " & Hex(This.DialoghWnd), CurrentComponentName, CurrentProcedureName
+        End If
+
+    ExitProc:
+        Return AccessSaveDialogResponses.Unknown
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    Private Sub ProcessListBoxSelection()
+        Dim ItemCount As Long = CLng(User32.SendDlgItemMessageW(This.DialoghWnd, ObjectListBoxId, User32.LB_GETCOUNT, 0, 0))
+        Dim Index As Long
+        Dim Length As Long
+        Dim ItemString As String
+        Dim IsSelected As Long
+        
+        Logger.PrintDebug ("Processing list box selection.", CurrentComponentName, CurrentProcedureName)
+        For Index = 0 To (ItemCount - 1)
+            Length = CLng(User32.SendDlgItemMessageW(This.DialoghWnd, ObjectListBoxId, User32.LB_GETTEXTLEN, Index, 0))
+            ItemString = String$(Length, vbNullChar)
+            If User32.SendDlgItemMessageW(This.DialoghWnd, ObjectListBoxId, User32.LB_GETTEXT, Index, StrPtr(ItemString)) < 0 Then
+                Logger.PrintError("Failed to get text for index " & Index & " with error " & Err.LastDllError, CurrentComponentName, CurrentProcedureName)
+            End If
+            
+            IsSelected = CLng(User32.SendDlgItemMessageW(This.DialoghWnd, ObjectListBoxId, User32.LB_GETSEL, Index, &H0))
+            If IsSelected < 0 Then
+                Logger.PrintError("Failed to get selection for index " & Index & " with error " & Err.LastDllError, CurrentComponentName, CurrentProcedureName)
+            End If
+            
+            Dim ObjectType As Access.AcObjectType = -2 ' Set to invalid value to avoid confusion with acTable (0)
+            Dim ObjectName As String
+            Dim Data As ObjectData
+            If TryParseObjectListboxItem(ItemString, ObjectType, ObjectName) Then
+                If ObjectTracker.TryAddItemFromName(ObjectType, ObjectName, Data) Then
+                    ObjectTracker.UpdateItem(Data.Index, If(IsSelected = 0, True, False), ObjectType, ObjectName)
+                    Logger.PrintDebug("Updated object data for index " & Index & " with text '" & ItemString & "'; parsed object type: " & ObjectType & ", parsed object name: " & ObjectName, CurrentComponentName, CurrentProcedureName)
+                Else
+                    Logger.PrintError("Failed to add object data for index " & Index & " containing text '" & ItemString & "'; parsed object type: " & ObjectType & ", parsed object name: " & ObjectName, CurrentComponentName, CurrentProcedureName)
+                End If
+            Else
+                Logger.PrintError("Failed to parse text for index " & Index & " with text '" & ItemString & "'", CurrentComponentName, CurrentProcedureName)
+            End If
+        Next
+    End Sub
+    
+    Public Sub Release(DialoghWnd As LongPtr)
+        If This.DialoghWnd = DialoghWnd Then
+            Logger.PrintDebug("Released dialog hwnd " & Hex(DialoghWnd), CurrentComponentName, CurrentProcedureName)
+            Reset()
+        ElseIf This.ParentDialoghWnd = DialoghWnd Then
+            Logger.PrintDebug("Released parent dialog hwnd " & Hex(DialoghWnd), CurrentComponentName, CurrentProcedureName)
+            This.ParentDialoghWnd = 0
+        Else
+            Logger.PrintError("Asked to release dialog with hWnd " & Hex(DialoghWnd) & " but does not match the cached hWnd " & Hex(This.DialoghWnd), CurrentComponentName, CurrentProcedureName)
+        End If
+    End Sub
+    
+    Private Sub UpdateState(DialoghWnd As LongPtr, DialogType As AccessSaveDialogTypes, DlgControls As DialogControls, OriginalObjectType As String, OriginalObjectName As String)
+        Reset()
+        
+        With This
+            .DialoghWnd = DialoghWnd
+            .DialogType = DialogType
+            If DialogType = AccessSaveDialogTypes.SaveMultiple Then
+            	.ParentDialoghWnd = DialoghWnd
+            End If
+            .DialogControls = DlgControls
+            .OriginalObjectTypeText = OriginalObjectType
+            If TryConvertObjectTypeStringToObjectTypeId(OriginalObjectType, .ObjectData.ObjectType) = False Then
+                .ObjectData.ObjectType = -2 ' Set to invalid object type because acTable = 0 which could be confusing. 
+                Logger.PrintError " Unable to parse object type for given string '" & OriginalObjectType & "' for the object named '" & OriginalObjectName & "'", CurrentComponentName, CurrentProcedureName
+            End If
+            .ObjectData.OriginalName = Trim$(OriginalObjectName)
+            
+            Logger.PrintDebug " Monitoring dialog hWnd: " & Hex(.DialoghWnd), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "            dialog type: " & .DialogType, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "   Original object type: " & .OriginalObjectTypeText, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "   Original object name: " & Trim$(.ObjectData.OriginalName), CurrentComponentName, CurrentProcedureName
+            If DialogType = AccessSaveDialogTypes.SaveMultiple Then
+                Logger.PrintDebug "   Using custom dialog for multiple objects", CurrentComponentName, CurrentProcedureName
+            ElseIf .DialogControls.DalStatic Then
+                Logger.PrintDebug "   Using custom dialog on object '" & Trim$(.ObjectData.OriginalName) & "'", CurrentComponentName, CurrentProcedureName
+            Else
+                Logger.PrintDebug "   Using standard dialog on object '" & Trim$(.ObjectData.OriginalName) & "'", CurrentComponentName, CurrentProcedureName
+            End If
+            
+            If .DialogType <> AccessSaveDialogTypes.SaveMultiple Then
+                If ObjectTracker.TryAddItemFromName(.ObjectData.ObjectType, .ObjectData.OriginalName, .ObjectData) Then
+                    Logger.PrintDebug "   Tracking the object '" & Trim$(.ObjectData.OriginalName) & "' with index of " & .ObjectData.Index, CurrentComponentName, CurrentProcedureName
+                Else
+                    Logger.PrintError "   Unable to identify the object '" & Trim$(.ObjectData.OriginalName) & "', not tracking it", CurrentComponentName, CurrentProcedureName
+                End If
+            End If
+        End With
+    End Sub
+    
+    Private Sub Reset()
+        Dim Blank As TState
+        Dim Tmp As LongPtr
+        Tmp = This.ParentDialoghWnd
+        LSet This = Blank
+        This.ParentDialoghWnd = Tmp
+        Logger.PrintDebug "DialogInspector state reset.", CurrentComponentName, CurrentProcedureName
+    End Sub
+    
+    Private Function TryExtractYesNoCancelPrompt(Caption As String, OutObjectType As String, OutObjectName As String) As Boolean
+        Dim SplitParts As Variant = Split(GetYesNoCancelPrompt, "|")
+        If Right$(Caption, 1) = vbNullChar Then
+            Caption = Left$(Caption, Len(Caption) - 1)
+        End If
+        If Left$(Caption, Len(SplitParts(0))) = SplitParts(0) _
+        AndAlso Right$(Caption, Len(SplitParts(1))) = SplitParts(1) Then
+            Dim Temp As String
+            Dim Position As Long
+            Temp = Mid$(Caption, Len(SplitParts(0)) + 1, Len(Caption) - Len(SplitParts(1)))
+            Position = InStr(1, Temp, " ", VbCompareMethod.vbTextCompare)
+            If Position Then
+                OutObjectType = Left$(Temp, Position - 1)
+                OutObjectName = ExtractObjectName(Temp)
+                
+                Logger.PrintDebug("Parsed the confirmation dialog; object type: " & OutObjectType & ";, object name: " & OutObjectName, CurrentComponentName, CurrentProcedureName)
+                Return (Len(OutObjectType) > 0) AndAlso (Len(OutObjectName) > 0)
+            Else
+                Logger.PrintDebug("The caption did not have the expected space: ", CurrentComponentName, CurrentProcedureName)
+                Logger.PrintDebug("   Temp: " & Temp, CurrentComponentName, CurrentProcedureName)
+            End If
+        Else
+            Logger.PrintDebug("The caption did not match the template: ", CurrentComponentName, CurrentProcedureName)
+            Logger.PrintDebug("   Caption: " & Caption, CurrentComponentName, CurrentProcedureName)
+            Logger.PrintDebug("      Left: " & Left$(Caption, Len(SplitParts(0))), CurrentComponentName, CurrentProcedureName)
+            Logger.PrintDebug("   To Left: " & SplitParts(0), CurrentComponentName, CurrentProcedureName)
+            Logger.PrintDebug("     Right: " & Right$(Caption, Len(SplitParts(1))), CurrentComponentName, CurrentProcedureName)
+            Logger.PrintDebug("  To Right: " & SplitParts(1), CurrentComponentName, CurrentProcedureName)
+        End If
+    End Function
+    
+    ' ?AccessError(8050)
+    ' Do you want to save changes to the design of |?@@@13@@@2
+    Private Function GetYesNoCancelPrompt() As String
+        Static CachedPrompt As String
+        If Len(CachedPrompt) = 0 Then
+        	Dim Position As Long
+            CachedPrompt = DllGlobal.AccessApp.AccessError(8050)
+            Position = InStr(1, CachedPrompt, "@", VbCompareMethod.vbTextCompare)
+            If Position Then
+                CachedPrompt = Left$(CachedPrompt, Position - 1)
+            End If
+        End If
+        
+        Return CachedPrompt
+    End Function
+    
+    ' Access will put object name in a quotes but will not escape the quotes in the object name.
+    ' Therefore, it's possible to have a string like "Save Query 'something's wrong'?" where the
+    ' query name is "something's wrong" which is a legal (but crappy) identifier for an Access
+    ' object. We should not rely on the Split() function. Fortunately, all interesting strings 
+    ' template appear to have only one quoted section so we can just extract by finding the first 
+    ' and the last quote marks and extract the substring in the middle.
+    Private Function ExtractObjectName(Caption As String) As String
+        Dim FirstPosition As Long
+        Dim LastPosition As Long
+        FirstPosition = InStr(1, Caption, "'", VbCompareMethod.vbTextCompare)
+        LastPosition = InStrRev(Caption, "'", , VbCompareMethod.vbTextCompare)
+        If FirstPosition > 0 _
+        AndAlso LastPosition > 0 _
+        AndAlso LastPosition > FirstPosition Then
+            Return Mid$(Caption, FirstPosition + 1, LastPosition - FirstPosition - 1)
+        End If
+    End Function
+
+    'TODO: Make this localizable somehow... 
+    Private Function TryExtractObjectTypePrompt(Caption As String, OutObjectType As String) As Boolean
+        ' Use regexp because we want word bounardary without assuming that the word appears at start / end 
+        ' (e.g. 'Query Name' or 'Nombre de consulta') where the object name we want would be "query" or
+        ' "consulta"
+        
+        Static RegExp As VBScript_RegExp_55.RegExp
+        If RegExp Is Nothing Then
+            Set RegExp = New VBScript_RegExp_55.RegExp
+            RegExp.Global = True
+            RegExp.Multiline = True
+            RegExp.IgnoreCase = True
+        End If
+        
+        RegExp.Pattern = "\bTable\b"
+        If RegExp.Test(Caption) Then
+            OutObjectType = "Table"
+            Return True
+        End If
+        
+        RegExp.Pattern = "\bQuery\b"
+        If RegExp.Test(Caption) Then
+            OutObjectType = "Query"
+            Return True
+        End If
+        
+        RegExp.Pattern = "\bForm\b"
+        If RegExp.Test(Caption) Then
+            OutObjectType = "Form"
+            Return True
+        End If
+        
+        RegExp.Pattern = "\bReport\b"
+        If RegExp.Test(Caption) Then
+            OutObjectType = "Report"
+            Return True
+        End If
+        
+        RegExp.Pattern = "\bMacro\b"
+        If RegExp.Test(Caption) Then
+            OutObjectType = "Macro"
+            Return True
+        End If
+        
+        RegExp.Pattern = "\bModule\b"
+        If RegExp.Test(Caption) Then
+            OutObjectType = "Module"
+            Return True
+        End If
+    End Function
+        
+    ' TODO: Figure a way to get localized names for the object types. There should be 
+    ' an internationalization DLL (e.g. MSAIN.DLL) that has the localized names in a 
+    ' string table or something equivalent. No luck so far so for now, hard-coding 
+    ' English names, which will fail on non-English Office.
+    '
+    ' NOTE: Table data macros are not handled; see notes at top.
+    Private Function TryConvertObjectTypeStringToObjectTypeId(ObjectType As String, OutObjectType As Access.AcObjectType) As Boolean
+        Select Case ObjectType
+            Case "Table"
+                OutObjectType = AcObjectType.acTable
+                Return True
+            Case "Query"
+                OutObjectType = AcObjectType.acQuery
+                Return True
+            Case "Form"
+                OutObjectType = AcObjectType.acForm
+                Return True
+            Case "Report"
+                OutObjectType = AcObjectType.acReport
+                Return True
+            Case "Macro"
+                OutObjectType = AcObjectType.acMacro
+                Return True
+            Case "Module" 'NOTE: This can be a VBA class or VBA Userform as well
+                OutObjectType = AcObjectType.acModule
+                Return True
+        End Select
+    End Function
+    
+    Private Function TryParseObjectListboxItem(ItemString As String, OutObjectType As Access.AcObjectType, OutObjectName As String) As Boolean
+        On Error GoTo ErrHandler
+        
+        ' Does diferent languages use a different separator other than colon? 
+        Dim SplitArgs As Variant = Split(ItemString, ":", 2, VbCompareMethod.vbTextCompare)
+        
+        If TryConvertObjectTypeStringToObjectTypeId(Trim$(SplitArgs(0)), OutObjectType) = False Then
+            Logger.PrintDebug("Failed to parse the object type for '" & Trim$(SplitArgs(0)) & "'", CurrentComponentName, CurrentProcedureName)
+            Return False
+        End If
+        
+        OutObjectName = Trim$(SplitArgs(1))
+        Return True
+        
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Return False
+    End Function
+End Module

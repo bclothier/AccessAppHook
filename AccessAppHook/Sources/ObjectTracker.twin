@@ -1,0 +1,685 @@
+' This module acts as a wanna-be singleton class which vaguely resembles a 
+' a stripped down version of a recordset with the following functionalities:
+'       * Simple forward-only enumeration
+'       * "Unique" indexing on the hWnds and original object type / name
+'       * Finding the data based on hWnd or Original object type / name
+'       * Ability to extract the object information from a given hWnd
+'       * Caching the hWnds & object data for later lookup / enumeration
+'       * Updating the object data to record the new object type / names
+'       * Instead of having fields, an UDT is used to represent the entire
+'           "row". The Index, DesignerhWnd, ObjectType and OriginalName 
+'           properties are supposed to be write-once and subsequently read-only.
+'
+' This is achieved using Scripting.Dictionary, where the main dictionary 
+' contains encoded values on the object data  and the additional dictionary
+' provides a pointer to the entry in the main dictionary to support lookups. 
+'
+' Forms, Reports and VBA objects require special handling and must be accounted for.
+'
+' With Forms and Reports, they have caption property which prevents us from relying on 
+' the GetWindowText win32 API provided via GetCaption function and though it's unlikely
+' it is possible that one form might have a caption that's same as a programmatic name
+' of an unrelated form. To avoid problems with this, both forms and reports collection 
+' are enumerated instead, since we can get the hWnd from them and the enumeration results
+' in caching all open forms/reports, which can be then looked up to simplify the subequent
+' lookup by the hWnd. 
+'
+' With VBA objects, they do not have a functional hWnd property and there is simply no 
+' reliable mechanism for relating a VBA window to a VBA code module and therefore identifying
+' by hWnds. VBIDE object model does report whether a VBComponent is "Saved" or not but it is not
+' reliable for edge cases where a new object is created but wasn't edited and we still need to use
+' SysCmd(acSysCmdGetObjectState) to handle this case. Also, unlike Forms/Reports, we cannot easily 
+' enumerate only the open objects but we should be able to enuemrate the VBComponents fairly fast.
+' Fortunateely, from Access' POV, everything is a "module" and we can find the VBComponent by its 
+' name so it'se enough to record acModule and the name. A VBA object cannot be changed into a 
+' a different data type as Access allows for its object.
+'
+' This module also abuses tB's feature of casting parameters from one UDT data type to another
+' which allows us to access the same memory contents differently without having to do any memory
+' copying, giving us a bit extra performance boost since it needs to be used in hooks and minimize
+' the overhead as much as possible. This is also why it's a module rather than a class. 
+'
+' The "uniqueness" is sort of enforced by checking the hwnds and the original object type / name 
+' during the adding of a new item to verify that it's not a different entry and to ensure that if
+' there's been an update, the hwnd / object type / object name will be perserved during an update. 
+' However, the scare quotes are present because in theory it's still posssibel to update the data
+' and leave it in a inconsistnt state. So, be careful, mmkay? 
+Private Module ObjectTracker
+    Public Enum AccessObjectState
+        ObjectIsNotOpenOrDoesntExist = 0
+        ObjectIsOpen = Access.acObjStateOpen
+        ObjectIsNew = Access.acObjStateNew
+        ObjectIsDirty = Access.acObjStateDirty
+        ObjectIsNewOrDirty = (Not ObjectIsOpen) ' Use in an AND operation and check if result is nonzero
+    End Enum
+    
+    Public Type ObjectData
+        Index As Integer
+        Cancelled As Boolean
+        ObjectType As Access.AcObjectType
+        NewObjectType As Access.AcObjectType
+        InitialObjectState As AccessObjectState
+        DesignerhWnd As LongPtr
+        OriginalName As String * 64
+        NewName As String * 64
+    End Type
+    
+    Private Type ObjectDataEncoded
+        BinaryValue As String * 140 'LenB(ObjectData) / 2 -- If the ObjectData UDT change update this, too.
+    End Type
+    
+    Private Type TState
+        HasForms As Boolean
+        HasReports As Boolean
+        HasVbaObjects As Boolean
+        CurrentIndex As Long
+        ObjectData As Scripting.Dictionary 'Keyed by an autoincrementing ID
+        hWndLookup As Scripting.Dictionary 'Keyed by hWnd
+        ObjectNameLookup As Scripting.Dictionary 'Keyed by object name
+    End Type
+    Private This As TState
+    
+    Public Sub Initialize()
+        With This
+            Set .ObjectData = New Scripting.Dictionary
+            .ObjectData.CompareMode = CompareMethod.TextCompare
+            Set .hWndLookup = New Scripting.Dictionary
+            .hWndLookup.CompareMode = CompareMethod.TextCompare
+            Set .ObjectNameLookup = New Scripting.Dictionary
+            .ObjectNameLookup.CompareMode = CompareMethod.TextCompare
+        End With
+    End Sub
+    
+    Public Sub Reset()
+        With This
+            .ObjectData.RemoveAll
+            .hWndLookup.RemoveAll
+            .ObjectNameLookup.RemoveAll
+            .HasForms = False
+            .HasReports = False
+            .HasVbaObjects = False
+            .CurrentIndex = 0
+        End With
+        
+        Logger.PrintDebug "ObjectTracker state reset.", CurrentComponentName, CurrentProcedureName
+    End Sub
+    
+    Public Property Get Count() As Long
+        Return This.ObjectData.Count
+    End Property
+    
+    Public Property Get Item() As ObjectData
+        Dim Data As ObjectData
+        If TryGetItem(This.CurrentIndex, VarPtr(Data)) Then
+            Return Data
+        Else
+            Err.Raise 5, CurrentComponentName & "." & CurrentProcedureName, "Cannot find the item at index '" & This.CurrentIndex & "'"
+        End If
+    End Property
+    
+    Public Function UpdateItem(Index As Integer, CancelSave As Boolean, NewObjectType As Access.AcObjectType, NewObjectName As String) As Boolean
+        On Error GoTo ErrHandler
+        
+        Dim Data As ObjectData
+        If TryGetItem(Index, VarPtr(Data)) Then
+            Logger.PrintDebug "Found data for the index " & Index, CurrentComponentName, CurrentProcedureName
+            Data.Cancelled = CancelSave
+            Data.NewObjectType = NewObjectType
+            Data.NewName = Trim$(NewObjectName)
+            Logger.PrintDebug "Updating new data for the index " & Index, CurrentComponentName, CurrentProcedureName
+            SetItem Index, Data.DesignerhWnd, Data.ObjectType, Data.OriginalName, VarPtr(Data)
+            Logger.PrintDebug "Updated new data for the index " & Index, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "         OriginalName: '" & Trim$(Data.OriginalName) & "'", CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "           ObjectType: " & Data.ObjectType, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "   InitialObjectState: " & Data.InitialObjectState, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "         DesignerhWnd: " & Hex(Data.DesignerhWnd), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "            Cancelled: " & Data.Cancelled, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "              NewName: '" & Trim$(Data.NewName) & "'", CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "        NewObjectType: " & Data.NewObjectType, CurrentComponentName, CurrentProcedureName
+            Return True
+        Else
+        	Return False
+        End If
+
+    ExitProc:
+        Return False
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    Private Function AddItem(ByRef ObjectData As ObjectData) As Long
+    	Dim TempIndex As Long
+        If ObjectData.DesignerhWnd AndAlso TryFindIndexByHwnd(ObjectData.DesignerhWnd, TempIndex) Then
+            ObjectData.Index = TempIndex
+        ElseIf Len(ObjectData.OriginalName) AndAlso TryFindIndexByName(ObjectData.ObjectType, ObjectData.OriginalName, TempIndex) Then
+            ObjectData.Index = TempIndex
+        Else
+            ObjectData.Index = This.ObjectData.Count
+        End If
+        SetItem ObjectData.Index, ObjectData.DesignerhWnd, ObjectData.ObjectType, ObjectData.OriginalName, VarPtr(ObjectData)
+            Logger.PrintDebug "Added new data for the index " & ObjectData.Index, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "         OriginalName: '" & Trim$(ObjectData.OriginalName) & "'", CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "           ObjectType: " & ObjectData.ObjectType, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "   InitialObjectState: " & ObjectData.InitialObjectState, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "         DesignerhWnd: " & Hex(ObjectData.DesignerhWnd), CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "            Cancelled: " & ObjectData.Cancelled, CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "              NewName: '" & Trim$(ObjectData.NewName) & "'", CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "        NewObjectType: " & ObjectData.NewObjectType, CurrentComponentName, CurrentProcedureName
+        Return ObjectData.Index
+    End Function
+    
+    Public Function TryAddItemFromhWnd(ByVal hWnd As LongPtr, ByRef OutObjectData As ObjectData) As Boolean
+        Dim Temp As ObjectData
+        Dim Blank As ObjectData
+        Dim ClassName As String
+        Dim Caption As String
+        Dim ItemAdded As Boolean
+        Dim IsVbaObject As Boolean
+        
+        OutObjectData.Index = -1
+        ClassName = GetClassName(hWnd)
+        If Len(ClassName) = 0 Then
+            Logger.PrintError "Unable to get class name for window " & Hex(hWnd) & ": " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
+            Return False
+        End If
+        
+        Select Case ClassName
+            Case AccessClasses.TableClass
+                With OutObjectData
+                    .DesignerhWnd = hWnd
+                    .ObjectType = Access.acTable
+                    .NewObjectType = Access.acTable
+                    .OriginalName = GetCaption(hWnd)
+                    .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                End With
+            Case AccessClasses.QueryClass
+                With OutObjectData
+                    .DesignerhWnd = hWnd
+                    .ObjectType = Access.acQuery
+                    .NewObjectType = Access.acQuery
+                    .OriginalName = GetCaption(hWnd)
+                    .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                End With
+            Case AccessClasses.FormClass
+                ' If there's any form class open go ahead and enumerate the Access' Forms collection and
+                ' cache any open forms and look up by hWnd for subsequent hWnds.
+                If This.HasForms Then
+                    If TryFindByhWnd(hWnd, OutObjectData) Then
+                        Return True
+                    Else
+                        This.HasForms = False
+                    End If
+                End If
+                
+                If This.HasForms = False Then
+                    Dim frm As Access.Form
+                    For Each frm In AccessApp.Forms
+                        LSet Temp = Blank
+                        With Temp
+                            .DesignerhWnd = frm.Hwnd
+                            .ObjectType = Access.acForm
+                            .NewObjectType = Access.acForm
+                            .OriginalName = frm.Name
+                            .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                        End With
+                        
+                        AddItem(Temp)
+                        
+                        If Temp.DesignerhWnd = hWnd Then
+                            LSet OutObjectData = Temp
+                            ItemAdded = True
+                        End If
+                    Next
+                    This.HasForms = True
+                End If
+            Case AccessClasses.ReportClass
+                ' If there's any report class open go ahead and enumerate the Access' Reports collection and
+                ' cache any open reports and look up by hWnd for subsequent hWnds.
+                If This.HasReports Then
+                    If TryFindByhWnd(hWnd, OutObjectData) Then
+                        Return True
+                    Else
+                        This.HasReports = False
+                    End If
+                End If
+                
+                If This.HasReports = False Then
+                    Dim rpt As Access.Report
+                    For Each rpt In AccessApp.Reports
+                        LSet Temp = Blank
+                        With Temp
+                            .DesignerhWnd = rpt.Hwnd
+                            .ObjectType = Access.acReport
+                            .NewObjectType = Access.acReport
+                            .OriginalName = rpt.Name
+                            .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                        End With
+                        
+                        AddItem(Temp)
+                        
+                        If Temp.DesignerhWnd = hWnd Then
+                            LSet OutObjectData = Temp
+                            ItemAdded = True
+                        End If
+                    Next
+                    This.HasReports = True
+                End If
+            Case AccessClasses.ScriptClass
+                ' Note: the Caption get populated via IsTableDataMacro to avoid calling GetCaption again.
+                If IsTableDataMacro(hWnd, Caption) Then
+                    With OutObjectData
+                        .DesignerhWnd = hWnd
+                        .ObjectType = Access.acTableDataMacro
+                        .NewObjectType = Access.acTableDataMacro
+                        .OriginalName = Caption
+                        .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                    End With
+                Else
+                    With OutObjectData
+                        .DesignerhWnd = hWnd
+                        .ObjectType = Access.acMacro
+                        .NewObjectType = Access.acMacro
+                        .OriginalName = Caption
+                        .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                    End With
+                End If
+            Case Else
+                Return False
+            ' Case AccessClasses.VBModuleClass, AccessClasses.VBUserFormClass
+                ' IsVbaObject = True
+                ' If This.HasVbaObjects Then
+                '     If TryFindByhWnd(hWnd, OutObjectData) Then
+                '         Return True
+                '     Else
+                '         This.HasVbaObjects = False
+                '     End If
+                ' End If
+                
+                ' If This.HasVbaObjects = False Then
+                '     If Hook.VbideMdiClientHandle = 0 Then
+                '         If InitializeVbIdeFromhWnd(GetParent(hWnd)) = False Then
+                '             Return False
+                '         End If
+                '     End If
+                            
+                '     Dim vbc As VBIDE.VBComponent
+                '     For Each vbc In DllGlobal.SourceVBProject.VBComponents
+                '         ' Ignore all document modules
+                '         Select Case vbc.Type
+                '             Case vbext_ComponentType.vbext_ct_StdModule, _ 
+                '                  vbext_ComponentType.vbext_ct_ClassModule, _ 
+                '                  vbext_ComponentType.vbext_ct_MSForm ', _ 
+                '                  vbext_ComponentType.vbext_ct_ActiveXDesigner ' Not sure if that's even a thing, commented out to save an evaluation
+                '             LSet Temp = Blank
+                '             With Temp
+                '                 Dim moduleCaption As String = vbc.CodeModule.CodePane.Window
+                '                 Logger.PrintDebug("Trying to find VBIDE window handle via caption '" & moduleCaption & "'", CurrentComponentName, CurrentProcedureName)
+                '                 Dim vbehWnd As LongPtr = User32.FindWindowExW(Hook.VbideMdiClientHandle, 0, ClassName, vbc.CodeModule.CodePane.Window)
+                '                 If vbehWnd Then
+                '                     Logger.PrintDebug("Found VBIDE window handle (" & Hex(vbehWnd) & ") for module '" & vbc.Name & "' with caption '" & moduleCaption & "'", CurrentComponentName, CurrentProcedureName)
+                '                 Else
+                '                     Logger.PrintDebug("Could not find the matching handle for module '" & vbc.Name & "' with caption '" & moduleCaption & "'", CurrentComponentName, CurrentProcedureName)
+                '                 End If
+                '                 .DesignerhWnd = vbehWnd
+                '                 .ObjectType = Access.acModule
+                '                 .NewObjectType = Access.acModule
+                '                 .OriginalName = vbc.Name
+                '                 .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                '             End With
+                            
+                '             AddItem(Temp)
+                            
+                '             If Temp.DesignerhWnd = hWnd Then
+                '                 LSet OutObjectData = Temp
+                '                 ItemAdded = True
+                '             End If
+                '         End Select
+                '     Next
+                '     This.HasVbaObjects = True
+                ' End If
+        End Select
+
+        If ItemAdded = False Then
+            AddItem(OutObjectData)
+        End If
+        
+        Return (((IsVbaObject = False AndAlso hWnd = OutObjectData.DesignerhWnd) OrElse (IsVbaObject AndAlso OutObjectData.DesignerhWnd = 0)) AndAlso OutObjectData.Index <> -1)
+    End Function
+    
+    Public Function TryAddItemFromName(ByVal ObjectType As Access.AcObjectType, ByVal ObjectName As String, ByRef OutObjectData As ObjectData) As Boolean
+        Dim ClassName As String
+        Dim Temp As ObjectData
+        Dim Blank As ObjectData
+        Dim ItemAdded As Boolean
+        Dim ObjectState As AccessObjectState
+        Dim TrimmedObjectName As String = Trim$(ObjectName)
+        
+        ' Try to determine if the object does exist before trying to find it.
+        ObjectState = GetObjectState(ObjectType, TrimmedObjectName)
+        If ObjectState = AccessObjectState.ObjectIsNotOpenOrDoesntExist Then
+            Logger.PrintError("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") is either not open or does not exist and therefore is not a valid object for tracking changes.", CurrentComponentName, CurrentProcedureName)
+            Return False
+        Else
+            Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") has the state: " & ObjectState, CurrentComponentName, CurrentProcedureName)
+        End If
+        
+        If TryFindByName(ObjectType, TrimmedObjectName, OutObjectData) Then
+            If OutObjectData.DesignerhWnd Then
+                If User32.IsWindow(OutObjectData.DesignerhWnd) Then
+                    Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") was found via TryFindByName; returning the cached data", CurrentComponentName, CurrentProcedureName)
+                    Return True
+                Else
+                    Logger.PrintError("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") was found but isn't a valid window handle?", CurrentComponentName, CurrentProcedureName)
+                End If
+            Else
+                Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") was found via TryFindByName; returning the cached data without DesignerhWnd", CurrentComponentName, CurrentProcedureName)
+                Return True
+            End If
+        Else
+            Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") not found via TryFindByName; going to add it", CurrentComponentName, CurrentProcedureName)
+            OutObjectData.ObjectType = ObjectType
+            OutObjectData.NewObjectType = ObjectType
+            OutObjectData.OriginalName = TrimmedObjectName
+            OutObjectData.InitialObjectState = ObjectState
+        End If
+        
+        Select Case ObjectType
+            Case AcObjectType.acTable
+                ClassName = AccessClasses.TableClass
+            Case AcObjectType.acQuery
+                ClassName = AccessClasses.QueryClass
+            Case AcObjectType.acMacro
+                ClassName = AccessClasses.ScriptClass
+        End Select
+        
+        If Len(ClassName) Then
+            Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") will be searched via FindWindowExW", CurrentComponentName, CurrentProcedureName)
+            OutObjectData.DesignerhWnd = User32.FindWindowExW(Hook.AccessMdiClientHandle, &h0&, ClassName, TrimmedObjectName)
+            If OutObjectData.DesignerhWnd = 0 Then
+                Logger.PrintDebug("Could not find the designer window handle for object '" & TrimmedObjectName & "' (Type " & ObjectType & ")", CurrentComponentName, CurrentProcedureName)
+            End If
+            AddItem(OutObjectData)
+            Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") was found via FindWindowExW and was added.", CurrentComponentName, CurrentProcedureName)
+            Return True
+        Else
+            Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") will be searched via scanning the respective collection", CurrentComponentName, CurrentProcedureName)
+            Select Case ObjectType
+                ' Table data macros will not have the same caption and FindWindowExA does not allow partial search. 
+                ' Therefore, we'll find the table then look to previous sibling.
+                Case AcObjectType.acTableDataMacro
+                    Dim TablehWnd As LongPtr
+                    Dim MacrohWnd As LongPtr
+                    
+                    ClassName = AccessClasses.TableClass
+                    TablehWnd = User32.FindWindowExW(Hook.AccessMdiClientHandle, &h0&, ClassName, TrimmedObjectName)
+                    If TablehWnd = 0 Then
+                    	Logger.PrintDebug("Could not find the corresponding designer window handle for table '" & TrimmedObjectName & "' (Type " & ObjectType & ") in the attempt to find its data macro designer window", CurrentComponentName, CurrentProcedureName)
+                    End If
+                    MacrohWnd = User32.GetWindow(TablehWnd, GetWindowCmds.GW_HWNDPREV)
+                    If MacrohWnd = 0 Then
+                        Logger.PrintDebug("Could not find the data macro designer window handle for object '" & TrimmedObjectName & "' (Type " & ObjectType & ") even though the table designer handle (" & Hex(TablehWnd) & ") was already found.", CurrentComponentName, CurrentProcedureName)
+                    End If
+                    OutObjectData.DesignerhWnd = MacrohWnd
+                    If AddItem(OutObjectData) Then
+                        Return True
+                    End If
+                ' NOTE: If we got here, then the FindItemByName at the start of the procedure failed either 
+                ' because there were no items or because it was modified. In this case, we don't bother to 
+                ' check the Has*** properties for the respective object types as we do in TryAddItemFromhWnd 
+                ' as we want to repopulate those objects.             
+                Case AcObjectType.acForm
+                    Dim frm As Access.Form
+                    For Each frm In AccessApp.Forms
+                        LSet Temp = Blank
+                        With Temp
+                            .DesignerhWnd = frm.Hwnd
+                            .ObjectType = Access.acForm
+                            .NewObjectType = Access.acForm
+                            .OriginalName = frm.Name
+                            .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                        End With
+                        
+                        AddItem(Temp)
+                        
+                        If Trim$(Temp.OriginalName) = TrimmedObjectName Then
+                            LSet OutObjectData = Temp
+                            ItemAdded = True
+                        End If
+                    Next
+                    This.HasForms = True
+                Case AcObjectType.acReport
+                    Dim rpt As Access.Report
+                    For Each rpt In AccessApp.Reports
+                        LSet Temp = Blank
+                        With Temp
+                            .DesignerhWnd = frm.Hwnd
+                            .ObjectType = Access.acReport
+                            .NewObjectType = Access.acReport
+                            .OriginalName = frm.Name
+                            .InitialObjectState = GetObjectState(.ObjectType,.OriginalName)
+                        End With
+                        
+                        AddItem(Temp)
+                        
+                        If Trim$(Temp.OriginalName) = TrimmedObjectName Then
+                            LSet OutObjectData = Temp
+                            ItemAdded = True
+                        End If
+                    Next
+                    This.HasReports = True
+                Case AcObjectType.acModule
+                    ' Try to find the object as part of the scanning
+                    If ScanVbeObjects(DllGlobal.SourceVBProject, OutObjectData) Then
+                        Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") was added via collection scanning and will be returned.", CurrentComponentName, CurrentProcedureName)
+                        Return True
+                    Else
+                        Logger.PrintError("Failed to find VBA object '" & TrimmedObjectName & "' after scanning VBA objects.", CurrentComponentName, CurrentProcedureName)
+                    End If
+            End Select
+            
+            If ItemAdded Then
+                Logger.PrintDebug("Object '" & TrimmedObjectName & "' (Type " & ObjectType & ") was added via collection scanning and will be returned.", CurrentComponentName, CurrentProcedureName)
+                Return True
+            End If
+        End If
+    End Function
+    
+    Public Function TryFindByhWnd(hWnd As LongPtr, OutFoundItem As ObjectData) As Boolean
+        Dim TempIndex As Long
+        If TryFindIndexByHwnd(hWnd, TempIndex) Then
+            Return TryGetItem(TempIndex, VarPtr(OutFoundItem))
+        End If
+    End Function
+    
+    Private Function TryFindIndexByHwnd(hWnd As LongPtr, OutIndex As Long) As Boolean
+        Dim hWndHex As String = Hex(hWnd)
+        If This.hWndLookup.Exists(hWndHex) Then
+            OutIndex = This.hWndLookup(hWndHex)
+            Return True
+        End If
+    End Function
+    
+    Public Function TryFindByName(OriginalObjectType As Access.AcObjectType, OriginalName As String, OutFoundItem As ObjectData) As Boolean
+        Dim TempIndex As Long
+        If TryFindIndexByName(OriginalObjectType, OriginalName, TempIndex) Then
+            Return TryGetItem(TempIndex, VarPtr(OutFoundItem))
+        End If
+    End Function
+        
+    Private Function TryFindIndexByName(OriginalObjectType As Access.AcObjectType, OriginalName As String, OutIndex As Long) As Boolean
+        Dim ConcatKey As String = OriginalObjectType & "|" & Trim$(OriginalName)
+        
+        If This.ObjectNameLookup.Exists(ConcatKey) Then
+            OutIndex = This.ObjectNameLookup(ConcatKey)
+            Return True
+        End If
+    End Function
+    
+    Public Property Get EOF() As Boolean
+        Return (This.CurrentIndex >= This.ObjectData.Count)
+    End Property
+    
+    Public Sub MoveFirst()
+        This.CurrentIndex = 0
+    End Sub
+    
+    Public Sub MoveNext()
+    	This.CurrentIndex += 1
+    End Sub
+    
+    Private CachedObjectData() As ObjectData
+    Public Function GetArray(OutUpper As Long) As ObjectData()
+    
+        If This.ObjectData.Count = 0 Then
+            Erase CachedObjectData
+            Return CachedObjectData
+        End If
+        
+        Dim Lower As Long = 0
+        OutUpper = (This.ObjectData.Count - 1)
+        Dim Index As Long
+        
+        ReDim CachedObjectData(Lower To OutUpper)
+        Do Until EOF
+            LSet CachedObjectData(Index) = Item()
+            MoveNext
+            Index += 1
+        Loop
+        
+        Return CachedObjectData
+    End Function
+    
+    Private Function TryGetItem(ByVal Index As Integer, ByRef Data As ObjectDataEncoded) As Boolean
+        On Error GoTo ErrHandler
+        
+        If This.ObjectData.Exists(Index) Then
+            Data.BinaryValue = This.ObjectData.Item(Index)
+            Return True
+        End If
+
+    ExitProc:
+        Return False
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Function
+    
+    Private Sub SetItem(ByVal Index As Integer, ByVal hWnd As LongPtr, ByVal OriginalObjectType As Access.AcObjectType, ByVal OriginalName As String, ByRef Data As ObjectDataEncoded)
+        On Error GoTo ErrHandler
+        
+        Dim TrimmedObjectName As String = Trim$(OriginalName)
+        
+        This.ObjectData(Index) = Data.BinaryValue
+        If hWnd Then
+            This.hWndLookup(Hex(hWnd)) = Index
+        End If
+        If Len(TrimmedObjectName) Then
+            This.ObjectNameLookup(OriginalObjectType & "|" & TrimmedObjectName) = Index
+        End If
+        
+    ExitProc:
+        Exit Sub
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
+    End Sub
+    
+    Public Sub ScanAllObjects()
+    	ScanAccessObjects(Hook.AccessMdiClientHandle)
+        ScanVbeObjects(DllGlobal.SourceVBProject)
+    End Sub
+    
+    Public Sub ScanAccessObjects(AccessMdiClientHwnd As LongPtr)
+        Dim ChildhWnd As LongPtr
+        Dim ObjectState As Long
+        
+        Do
+            ChildhWnd = User32.FindWindowExW(AccessMdiClientHwnd, ChildhWnd, vbNullString, vbNullString)
+            If ChildhWnd Then
+                Dim Ignored As ObjectData
+                If TryAddItemFromhWnd(ChildhWnd, Ignored) = False Then
+                    Logger.PrintDebug "TryAddItemFromhWnd did not add hwnd: " & Hex(ChildhWnd), CurrentComponentName, CurrentProcedureName
+                End If
+            End If
+        Loop While ChildhWnd
+    End Sub
+    
+    Public Sub ScanVbeObjects(VBAProject As VBIDE.VBProject)
+        Dim Ignored As ObjectData
+        ScanVbeObjects(VBAProject, Ignored)
+    End Sub
+    
+    ' The scan procedure allows us to update an existing ObjectData in-place as part of the scanning.
+    ' The return result allows us to ascribe if a match was found during scanning or not.
+    Private Function ScanVbeObjects(VBAProject As VBIDE.VBProject, ByRef RefObjectData As ObjectData) As Boolean
+        Dim vbc As VBIDE.VBComponent
+        Dim Data As ObjectData
+        Dim State As AccessObjectState
+        Dim ItemFound As Boolean
+        
+        For Each vbc In VBAProject.VBComponents
+            ' We don't care about documents because we deal with them via forms/reports
+            Select Case vbc.Type
+                Case VBIDE.vbext_ComponentType.vbext_ct_StdModule, _
+                     VBIDE.vbext_ComponentType.vbext_ct_ClassModule, _
+                     VBIDE.vbext_ComponentType.vbext_ct_MSForm ', _ 
+                     VBIDE.vbext_ComponentType.vbext_ct_ActiveXDesigner 'Is it even a thing? I don't think so... Commented out to save an evaluation
+                    State = GetObjectState(AcObjectType.acModule, vbc.Name)
+                    ' We aren't interested in merely open objects but new or dirty objects.
+                    If (State And ObjectIsNewOrDirty) Then
+                        With Data
+                            .ObjectType = AcObjectType.acModule
+                            .NewObjectType = AcObjectType.acModule
+                            .OriginalName = vbc.Name
+                            .InitialObjectState = State
+                        End With
+                        AddItem(Data)
+                        
+                        If Data.ObjectType = RefObjectData.ObjectType _ 
+                        AndAlso Data.OriginalName = RefObjectData.OriginalName Then
+                            LSet RefObjectData = Data
+                            ItemFound = True
+                        End If
+                        
+                        If This.HasVbaObjects = False Then
+                            This.HasVbaObjects = True
+                        End If
+                    End If
+            End Select
+        Next
+        
+        Return ItemFound
+    End Function
+    
+    Private Function GetObjectState(ObjectType As Access.AcObjectType, ObjectName As String) As AccessObjectState
+    '     On Error GoTo ErrHandler
+        
+        Return AccessApp.SysCmd(acSysCmdGetObjectState, ObjectType, Trim$(ObjectName))
+        
+    ' ErrHandler:
+    '     Logger.PrintError("Unable to get object state: " & Err.Number & " - " & Err.Description, CurrentComponentName, CurrentProcedureName)
+    '     Return AccessObjectState.ObjectIsNewOrDirty
+    End Function
+    
+    ' Note: Because as part of the test, we must extract the caption of the data macro and the table
+    ' and to avoid having to parse out the data macro part, we will return the table's caption. If
+    ' it is not a data macro, we would end up needing the macro's caption anyway, so even in that case
+    ' we return the caption even though the result is false so that the callee can save itself an extra
+    ' call to GetCaption() for the macro's caption.
+    Private Function IsTableDataMacro(hWnd As LongPtr, OutCaption As String) As Boolean
+        Dim NextWindowhWnd As LongPtr
+        NextWindowhWnd = User32.GetWindow(hWnd, GW_HWNDNEXT)
+        If NextWindowhWnd <> 0 AndAlso GetClassName(NextWindowhWnd) = AccessClasses.TableClass Then
+            If (GetWindowLongPtrW(NextWindowhWnd, GWL_STYLE) And WS_DISABLED) = WS_DISABLED _
+            AndAlso (GetWindowLongPtrW(hWnd, GWL_STYLE) And WS_DISABLED) <> WS_DISABLED Then
+                Dim PossibleTableName As String = GetCaption(NextWindowhWnd)
+                OutCaption = GetCaption(hWnd)
+                Return (InStr(1, OutCaption, PossibleTableName & " :", VbCompareMethod.vbTextCompare) = 1)
+            End If
+        End If
+    End Function
+End Module

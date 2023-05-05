@@ -1,0 +1,62 @@
+' The module deals with functions to help manipulate memory such as splitting DWORDs into WORDs
+' or handling declares that requires some string handling.
+Private Module MemoryFunctions
+    Public Function HiWord(Value As LongPtr) As Integer
+        Dim Result As Integer
+        msvbvm60.GetMem2 VarPtr(Value) + LenB(Result), Result
+        Return Result
+    End Function
+    
+    Public Function LoWord(Value As LongPtr) As Integer
+        Dim Result As Integer
+        msvbvm60.GetMem2 VarPtr(Value), Result
+        Return Result
+    End Function
+    
+    Public Function GetClassNameOrAtomName(Ptr As LongPtr) As String
+        If HiWord(Ptr) = 0 Then
+            Dim Tmp As String = String$(255, vbNullChar)
+            Dim Length As Long
+            Length = GetAtomNameW(LoWord(Ptr), Tmp, 255)
+            If Length Then
+                Return Left$(Tmp, Length)
+            End If
+        Else
+            Return OleAut32.SysAllocString(Ptr)
+        End If
+    End Function
+
+    Public Function GetClassName(hWnd As LongPtr) As String
+        Dim ClassName As String
+        Dim Length As Long
+        
+        ClassName = Space$(256)
+        Length = User32.GetClassNameW(hWnd, ClassName, 256)
+        
+        If Length Then
+            Return Left$(ClassName, Length)
+        Else
+            Dim LastDllErr As Long = Err.LastDllError
+            If LastDllErr Then
+                Logger.PrintError "Unable to get class name for child window: " & LastDllErr, CurrentComponentName, CurrentProcedureName
+            End If
+        End If
+    End Function
+    
+    Public Function GetCaption(hWnd As LongPtr) As String
+        Dim Caption As String
+        Dim Length As Long
+        
+        Caption = Space$(256)
+        Length = User32.GetWindowTextW(hWnd, Caption, 256)
+        
+        If Length Then
+            Return Left$(Caption, Length)
+        Else
+            Dim LastDllErr As Long = Err.LastDllError
+            If LastDllErr Then
+                Logger.PrintError "Unable to get caption for child window: " & LastDllErr, CurrentComponentName, CurrentProcedureName
+            End If
+        End If
+    End Function
+End Module

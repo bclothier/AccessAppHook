@@ -1,0 +1,19 @@
+Private Module OleAut32
+    ' BSTR SysAllocString(
+    '   [in, optional] const OLECHAR *psz
+    ' );
+    Public DeclareWide PtrSafe Function SysAllocString _
+    Lib "OleAut32.dll" ( _
+        ByVal psz As LongPtr _
+    ) As String
+    
+    ' BSTR SysAllocStringByteLen(
+    '   [in, optional] LPCSTR psz,
+    '   [in]           UINT   len
+    ' );    
+    Public DeclareWide PtrSafe Function SysAllocStringByteLen _
+    Lib "OleAut32.dll" ( _
+        ByVal psz As LongPtr, _
+        ByVal len As Long _
+    ) As String
+End Module
