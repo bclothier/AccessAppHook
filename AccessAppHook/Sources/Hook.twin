@@ -76,10 +76,10 @@ Private Module Hook
         Return This.CachedVbideMdiClienthWnd
     End Property
     
-    Public Function Initialize(AfterSaveRequestDelayMilliseconds As Long) As Boolean
+    Public Function Initialize(AfterSaveRequestDelayMilliseconds As Long, LogFilePath As String) As Boolean
         On Error GoTo ErrHandler
         
-        Logger.Initialize
+        Logger.Initialize(LogFilePath)
         ObjectTracker.Initialize
         This.AfterSaveRequestDelay = AfterSaveRequestDelayMilliseconds
         
@@ -252,6 +252,8 @@ Private Module Hook
     End Sub
     
     Private Sub FindVbIdeWindows()
+        On Error GoTo ErrHandler
+        
         If This.CachedVbidehWnd = 0 Then
             Dim TmphWnd As LongPtr
             Do
@@ -271,9 +273,16 @@ Private Module Hook
         If This.CachedVbidehWnd Then
             This.CachedVbideMdiClienthWnd = User32.FindWindowExW(This.CachedVbideMdiClienthWnd, 0, AccessClasses.MDIClientClass, vbNullString)
         End If
+        
+        Exit Sub
+
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Exit Sub
     End Sub
     
     Public Function InitializeVbIdeFromhWnd(PossibleMdiClientHwnd As LongPtr) As Boolean
+        On Error GoTo ErrHandler
         If This.CachedVbidehWnd Then
             Return True
         End If
@@ -291,6 +300,13 @@ Private Module Hook
                 End If
             End If
         End If
+        
+    ExitProc:
+        Return False
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
     End Function
     
     Private Sub SubclassExistingAccessChildWindows()
@@ -371,6 +387,8 @@ Private Module Hook
         Dim CurrenthWnd As LongPtr = StartinghWnd
         Dim ClassName As String
         
+        On Error GoTo ErrHandler
+        
         Do
             Select Case CurrenthWnd
                 Case This.CachedAccesshWnd, This.CachedAccessMdiClienthWnd
@@ -397,6 +415,8 @@ Private Module Hook
     End Function
     
     Private Function TryFindFirstInterestingAccessWindow(OutChildhWnd As LongPtr) As Boolean
+        On Error GoTo ErrHandler
+        
         If This.CachedAccessMdiClienthWnd = 0 Then
             Return False
         End If
@@ -415,9 +435,18 @@ Private Module Hook
             End Select
             ChildhWnd = User32.GetWindow(ChildhWnd, GetWindowCmds.GW_HWNDNEXT)
         Loop Until ChildhWnd = 0
+        
+    ExitProc:
+        Return False
+        
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
     End Function
     
     Private Function TryFindFirstInterestingVbeWindow(OutChildhWnd As LongPtr) As Boolean
+        On Error GoTo ErrHandler
+        
         If This.CachedVbideMdiClienthWnd = 0 Then
             Return False
         End If
@@ -433,9 +462,18 @@ Private Module Hook
             End Select
             ChildhWnd = User32.GetWindow(ChildhWnd, GetWindowCmds.GW_HWNDNEXT)
         Loop Until ChildhWnd = 0
+        
+    ExitProc:
+        Return False
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
     End Function
 
     Private Function IsInterestingWindow(hWnd As LongPtr) As Boolean
+        On Error GoTo ErrHandler
+        
         Dim ClassName As String = GetClassName(hWnd)
         Select Case ClassName
             Case AccessClasses.TableClass, _
@@ -447,6 +485,13 @@ Private Module Hook
                  AccessClasses.VBUserFormClass
                 Return True
         End Select
+        
+    ExitProc:
+        Return False
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Resume ExitProc
     End Function
     
     ' LRESULT CALLBACK GetMsgProc(
@@ -586,7 +631,9 @@ Private Module Hook
         ByVal hWnd As LongPtr, _ 
         ByVal uMsg As Long, _ 
         ByVal wParam As LongPtr, _
-        ByVal lParam As LongPtr _
+        ByVal lParam As LongPtr, _
+        ByVal uIdSubclass As LongPtr, _ 
+        ByRef dwRefData As Long _
     ) As LongPtr
         On Error GoTo ErrHandler
         
@@ -613,7 +660,9 @@ Private Module Hook
         ByVal hWnd As LongPtr, _ 
         ByVal uMsg As Long, _ 
         ByVal wParam As LongPtr, _
-        ByVal lParam As LongPtr _
+        ByVal lParam As LongPtr, _
+        ByVal uIdSubclass As LongPtr, _ 
+        ByRef dwRefData As Long _
     ) As LongPtr
         On Error GoTo ErrHandler
         
@@ -679,12 +728,6 @@ Private Module Hook
                     Logger.PrintError "Removing subclass failed: " & Err.LastDllError, CurrentComponentName, CurrentProcedureName
                 End If
             End If
-            ' Logger.PrintDebug "Window shown for hwnd " & Hex(hWnd), CurrentComponentName, CurrentProcedureName
-            ' Dim ChildhWnd As LongPtr = User32.GetWindow(hWnd, GetWindowCmds.GW_CHILD)
-            ' Do Until ChildhWnd = 0
-            '     Logger.PrintDebug "  Control " & Hex(ChildhWnd) & "; Id: " & User32.GetDlgCtrlID(ChildhWnd) & ", Class: " & GetClassName(ChildhWnd) & " Caption: " & GetCaption(ChildhWnd), CurrentComponentName, CurrentProcedureName
-            '     ChildhWnd = User32.GetWindow(ChildhWnd, GetWindowCmds.GW_HWNDNEXT)
-            ' Loop
         End If
 
     ExitProc:
@@ -793,6 +836,8 @@ Private Module Hook
     End Sub
     
     Private Function TryGetFirstActiveInterestingWindow() As Boolean
+        On Error GoTo ErrHandler
+        
         Dim RootOwnerhWnd As LongPtr
 
         If This.CachedVbidehWnd = 0 Then
@@ -877,5 +922,9 @@ Private Module Hook
         End If
         
         Return ObjectTracker.Count > 0
+    
+    ErrHandler:
+        Logger.PrintError "Unexpected error " & Err.Number & ": " & Err.Description, CurrentComponentName, CurrentProcedureName
+        Return False
     End Function
 End Module

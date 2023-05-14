@@ -10,6 +10,7 @@ Public Module DllGlobal
         CallbackProject As VBIDE.VBProject
         AfterSaveRequestDelayMilliseconds As Long
         AfterSaveCallbackProcedureName As String
+        LogFilePath As String
     End Type
     
     Private Type TState
@@ -17,6 +18,7 @@ Public Module DllGlobal
         AfterSaveRequestDelayMilliseconds As Long
         CallbackProjectName As String
         AfterSaveCallbackProcedureName As String
+        LogFilePath As String
     End Type
     Private This As TState
         
@@ -26,8 +28,16 @@ Public Module DllGlobal
         This.CallbackProjectName = Config.CallbackProject.Name
         This.AfterSaveCallbackProcedureName = Config.AfterSaveCallbackProcedureName
         This.AfterSaveRequestDelayMilliseconds = Config.AfterSaveRequestDelayMilliseconds
+        This.LogFilePath = Config.LogFilePath
         
-        Return Hook.Initialize(This.AfterSaveRequestDelayMilliseconds)
+        ' MsgBox "Configuration:" & vbNewLine & _    
+                "  App hWnd: " & This.App.hWndAccessApp & vbNewLine & _
+                "  CallbackProjectName: " & This.CallbackProjectName & vbNewLine & _
+                " AfterSaveCallbackProcedureName: " & This.AfterSaveCallbackProcedureName & vbNewLine & _
+                " AfterSaveRequestDelayMilliseconds: " & This.AfterSaveRequestDelayMilliseconds & vbNewLine & _ 
+                " LogFilePath: " & This.LogFilePath
+                
+        Return Hook.Initialize(This.AfterSaveRequestDelayMilliseconds, This.LogFilePath)
     End Function
     
     [ DllExport ]
@@ -45,5 +55,9 @@ Public Module DllGlobal
             .Key = 51488399
             Return .DbcVbProject
         End With
+    End Property
+    
+    Public Property Get CallbackProcedureName() As String
+        Return This.CallbackProjectName & "." & This.AfterSaveCallbackProcedureName
     End Property
 End Module

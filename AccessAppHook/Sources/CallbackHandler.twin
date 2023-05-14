@@ -1,14 +1,17 @@
 Private Module CallbackHandler
+    ' Avoid lifetime bugs associated with array returned to VBx. If a private declaration is used, array is apparently freed too soon.
+    Private ObjectData() As ObjectData
+        
     Public Sub InvokeAfterSaveCallback()
         On Error GoTo ErrHandler
         
         Dim Upper As Long
-        Dim ObjectData() As ObjectData
         Logger.PrintDebug("Executing 'ObjectTracker.GetArray()'", CurrentComponentName, CurrentProcedureName)
         ObjectData = ObjectTracker.GetArray(Upper)
-        Logger.PrintDebug("Executing InvokeAfterSaveCallback procedure '" & "'", CurrentComponentName, CurrentProcedureName)
-        DllGlobal.AccessApp.Run "MSAccessVCS.HandleExportCallback", Upper, ObjectData
-    
+        Logger.PrintDebug("Executing InvokeAfterSaveCallback procedure '" & DllGlobal.CallbackProcedureName & "'", CurrentComponentName, CurrentProcedureName)
+        DllGlobal.AccessApp.Run DllGlobal.CallbackProcedureName, Upper, ObjectData
+        Logger.PrintDebug("Executed InvokeAfterSaveCallback procedure '" & DllGlobal.CallbackProcedureName & "'", CurrentComponentName, CurrentProcedureName)
+        
     ExitProc:
         Exit Sub
         

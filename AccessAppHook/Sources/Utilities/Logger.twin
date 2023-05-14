@@ -7,21 +7,21 @@ Private Module Logger
     End Type
     Private This As Tstate
 
-    Public Sub Initialize()
-        If Len(This.FilePath) Then
+    Public Sub Initialize(LogFilePath As String)
+        If This.FilePath = LogFilePath Then
             Exit Sub
         End If
         
         If Kernel32.QueryPerformanceFrequency(This.Frequency) = False Then
             This.Frequency = 1 ' Avoid a division by zero error
-            '???
+            Err.Raise 5, CurrentComponentName & "." & CurrentProcedureName, "Failed to execute Kernel32.QueryPerformanceFrequency; LastDllError is " & Err.LastDllError & "."
         End If
         
         If Kernel32.QueryPerformanceCounter(This.Start) = False Then
-            '???
+            Err.Raise 5, CurrentComponentName & "." & CurrentProcedureName, "Failed to execute Kernel32.QueryPerformanceCounter; LastDllError is " & Err.LastDllError & "."
         End If
                 
-        This.FilePath = App.Path & "\MSAccessVCSHook.log"
+        This.FilePath = LogFilePath
         
         If Len(Dir$(This.FilePath, vbDirectory)) Then
             Kill This.FilePath
@@ -51,16 +51,22 @@ Private Module Logger
     End Sub
     
     Private Sub WriteLine(Line As String)
-    	Open This.FilePath For Append Access Read Write Shared Encoding utf_8_bom As This.FileHandle
-        Print #This.FileHandle, Line
-        Close This.FileHandle
+        If Len(This.FilePath) Then
+            Open This.FilePath For Append Access Read Write Shared Encoding utf_8_bom As This.FileHandle
+            Print #This.FileHandle, Line
+            Close This.FileHandle
+        End If
     End Sub
     
     Private Function Timestamp() As String
         Const MicrosecondPrecision As LongLong = 1000000^
-                                                 
+
+        If Len(This.FilePath) = 0 Then
+            Return Format$(Now(), "hh:nn:ss") & ".xxxxxx"
+        End If
+        
         Dim Ticks As LongLong
-    	Kernel32.QueryPerformanceCounter Ticks
+    	Kernel32.QueryPerformanceCounter(Ticks)
         
         Dim Microseconds As LongLong = ((Ticks - This.Start) * MicrosecondPrecision) / This.Frequency
         Dim Seconds As Date = DateAdd("s", Microseconds / MicrosecondPrecision, 0)

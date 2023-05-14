@@ -160,12 +160,12 @@ Private Module ObjectTracker
         End If
         SetItem ObjectData.Index, ObjectData.DesignerhWnd, ObjectData.ObjectType, ObjectData.OriginalName, VarPtr(ObjectData)
             Logger.PrintDebug "Added new data for the index " & ObjectData.Index, CurrentComponentName, CurrentProcedureName
-            Logger.PrintDebug "         OriginalName: '" & Trim$(ObjectData.OriginalName) & "'", CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "         OriginalName: '" & Trim$(Replace(ObjectData.OriginalName, vbNullChar, vbNullString)) & "'", CurrentComponentName, CurrentProcedureName
             Logger.PrintDebug "           ObjectType: " & ObjectData.ObjectType, CurrentComponentName, CurrentProcedureName
             Logger.PrintDebug "   InitialObjectState: " & ObjectData.InitialObjectState, CurrentComponentName, CurrentProcedureName
             Logger.PrintDebug "         DesignerhWnd: " & Hex(ObjectData.DesignerhWnd), CurrentComponentName, CurrentProcedureName
             Logger.PrintDebug "            Cancelled: " & ObjectData.Cancelled, CurrentComponentName, CurrentProcedureName
-            Logger.PrintDebug "              NewName: '" & Trim$(ObjectData.NewName) & "'", CurrentComponentName, CurrentProcedureName
+            Logger.PrintDebug "              NewName: '" & Trim$(Replace(ObjectData.NewName, vbNullChar, vbNullString)) & "'", CurrentComponentName, CurrentProcedureName
             Logger.PrintDebug "        NewObjectType: " & ObjectData.NewObjectType, CurrentComponentName, CurrentProcedureName
         Return ObjectData.Index
     End Function
