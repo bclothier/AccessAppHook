@@ -149,6 +149,30 @@ Private Module ObjectTracker
         Resume ExitProc
     End Function
     
+    Public Function TryAddItemFromNameAsDirty(ByVal ObjectType As AcObjectType, ObjectName As String, OutObjectData As ObjectData) As Boolean
+        Dim Data As ObjectData
+        
+        If TryFindByName(ObjectType, ObjectName, Data) Then
+            Data.InitialObjectState = ObjectIsDirty
+            SetItem Data.Index, Data.DesignerhWnd, Data.ObjectType, Data.OriginalName, VarPtr(Data)
+            OutObjectData = Data
+            Return True
+        Else
+            With Data
+                .InitialObjectState = ObjectIsDirty
+                .OriginalName = ObjectName
+                .NewName = ObjectName
+                .ObjectType = ObjectType
+                .NewObjectType = ObjectType
+            End With
+        
+            If AddItem(Data) Then
+                OutObjectData = Data
+                Return True
+            End If
+        End If
+    End Function
+    
     Private Function AddItem(ByRef ObjectData As ObjectData) As Long
     	Dim TempIndex As Long
         If ObjectData.DesignerhWnd AndAlso TryFindIndexByHwnd(ObjectData.DesignerhWnd, TempIndex) Then
@@ -644,6 +668,14 @@ Private Module ObjectTracker
                             LSet RefObjectData = Data
                             ItemFound = True
                         End If
+                        
+                        If This.HasVbaObjects = False Then
+                            This.HasVbaObjects = True
+                        End If
+                    ' Handle the exception where we have a object data that was dirty but it is no longer dirty; we still want to handle it anyway.
+                    ElseIf ((RefObjectData.InitialObjectState And ObjectIsNewOrDirty) AndAlso ((RefObjectData.OriginalName = vbc.Name) OrElse (RefObjectData.NewName = vbc.Name))) Then
+                        AddItem(Data)
+                        ItemFound = True
                         
                         If This.HasVbaObjects = False Then
                             This.HasVbaObjects = True

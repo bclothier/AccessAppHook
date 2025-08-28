@@ -858,11 +858,35 @@ Private Module Hook
             If RootOwnerhWnd = This.CachedAccesshWnd Then
                 Logger.PrintDebug("Root owner hwnd " & Hex(RootOwnerhWnd) & " matches Access' hWndAccessApp so Access is in foreground", CurrentComponentName, CurrentProcedureName)
                 ' Access is in foreground.
+                If TryFindFirstInterestingAccessWindow(ActiveDesignerhWnd) Then
+                    If ObjectTracker.TryAddItemFromhWnd(ActiveDesignerhWnd, Data) Then
+                        Logger.PrintDebug("Added Access object '" & Trim$(Data.OriginalName) & "' (Type " & Data.ObjectType & ") for the hWnd " & Hex(ActiveDesignerhWnd), CurrentComponentName, CurrentProcedureName)
+                    Else
+                        Logger.PrintError("Failed to add Access object for active designer hWnd: " & Hex(ActiveDesignerhWnd), CurrentComponentName, CurrentProcedureName)
+                    End If
+                Else
+                    Logger.PrintDebug("There are no open designer windows?", CurrentComponentName, CurrentProcedureName)
+                End If
             ElseIf This.CachedVbidehWnd <> 0 _
             AndAlso RootOwnerhWnd = This.CachedVbidehWnd Then
                 ' VBIDE is already opened and in foreground.
                 Logger.PrintDebug("Root owner hwnd " & Hex(RootOwnerhWnd) & " matches VBIDE's main window's hWnd so VBIDE is in foreground", CurrentComponentName, CurrentProcedureName)
                 VbIdeIsActive = True
+                With DllGlobal.AccessApp.VBE
+                    Logger.PrintDebug("Checking if VBE's selected component is also owned by the root", CurrentComponentName, CurrentProcedureName)
+                    If DllGlobal.SourceVBProject Is .SelectedVBComponent.Collection.Parent Then
+                        Logger.PrintDebug("Trying to add VBA object '" & .SelectedVBComponent.Name & "'", CurrentComponentName, CurrentProcedureName)
+                        If ObjectTracker.TryAddItemFromNameAsDirty(AcObjectType.acModule, .SelectedVBComponent.Name, Data) Then
+                            Logger.PrintDebug("Added VBA object '" & .SelectedVBComponent.Name & "' as the active object", CurrentComponentName, CurrentProcedureName)
+                        Else
+                            Logger.PrintError("Failed to add '" & .SelectedVBComponent.Name & "' as the active object", CurrentComponentName, CurrentProcedureName)
+                        End If
+                        Logger.PrintDebug("Done adding attempt", CurrentComponentName, CurrentProcedureName)
+                    Else
+                        Logger.PrintDebug("Found active VBA object '" & .SelectedVBComponent.Name & "' but it does not appear to be in the source VBA project.", CurrentComponentName, CurrentProcedureName)
+                    End If
+                    Logger.PrintDebug("Done checking", CurrentComponentName, CurrentProcedureName)
+                End With
             Else
                 ' The foreground window doesn't appear to be either Access nor VBIDE window. Let's try and find them instead.
                 Logger.PrintDebug("Root owner hwnd " & Hex(RootOwnerhWnd) & " does not match neither Access' nor VBIDE's hWnd", CurrentComponentName, CurrentProcedureName)
@@ -871,6 +895,7 @@ Private Module Hook
         End If
         
         If RootOwnerhWnd = 0 Then
+            Logger.PrintDebug("No root owner handle was found, so trying FindWindowEx instead", CurrentComponentName, CurrentProcedureName)
             Dim LowerZOrderhWnd As LongPtr
             LowerZOrderhWnd = This.CachedAccesshWnd
             Do
@@ -897,8 +922,8 @@ Private Module Hook
             Dim Data As ObjectData
             If VbIdeIsActive <> False AndAlso LowerZOrderhWnd <> 0 Then
                 With DllGlobal.AccessApp.VBE
-                    If DllGlobal.SourceVBProject Is .ActiveVBProject Then
-                        If ObjectTracker.TryAddItemFromName(.SelectedVBComponent.Name, AcObjectType.acModule, Data) Then
+                    If DllGlobal.SourceVBProject Is .SelectedVBComponent.Collection.Parent Then
+                        If ObjectTracker.TryAddItemFromName(AcObjectType.acModule, .SelectedVBComponent.Name, Data) Then
                             Logger.PrintDebug("Added VBA object '" & .SelectedVBComponent.Name & "' as the active object", CurrentComponentName, CurrentProcedureName)
                         Else
                             Logger.PrintError("Failed to add '" & .SelectedVBComponent.Name & "' as the active object", CurrentComponentName, CurrentProcedureName)
