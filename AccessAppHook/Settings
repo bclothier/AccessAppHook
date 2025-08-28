@@ -20,6 +20,7 @@
 			"name": "OLE Automation",
 			"path32": "C:\\Windows\\SysWOW64\\stdole2.tlb",
 			"path64": "C:\\Windows\\System32\\stdole2.tlb",
+			"symbolId": "stdole",
 			"versionMajor": 2,
 			"versionMinor": 0
 		},
@@ -29,6 +30,7 @@
 			"name": "Microsoft Scripting Runtime",
 			"path32": "C:\\Windows\\SysWOW64\\scrrun.dll",
 			"path64": "C:\\Windows\\System32\\scrrun.dll",
+			"symbolId": "Scripting",
 			"versionMajor": 1,
 			"versionMinor": 0
 		},
@@ -38,6 +40,7 @@
 			"name": "Microsoft VBScript Regular Expressions 5.5",
 			"path32": "C:\\Windows\\SysWOW64\\vbscript.dll\\3",
 			"path64": "C:\\Windows\\System32\\vbscript.dll\\3",
+			"symbolId": "VBScript_RegExp_55",
 			"versionMajor": 5,
 			"versionMinor": 5
 		},
@@ -47,6 +50,7 @@
 			"name": "Microsoft Access 16.0 Object Library",
 			"path32": "",
 			"path64": "C:\\Program Files\\Microsoft Office\\Root\\Office16\\MSACC.OLB",
+			"symbolId": "Access",
 			"versionMajor": 9,
 			"versionMinor": 0
 		},
@@ -56,6 +60,7 @@
 			"name": "Microsoft Visual Basic for Applications Extensibility 5.3",
 			"path32": "C:\\Program Files\\Microsoft Office\\Root\\VFS\\ProgramFilesCommonX86\\Microsoft Shared\\VBA\\VBA6\\VBE6EXT.OLB",
 			"path64": "",
+			"symbolId": "VBIDE",
 			"versionMajor": 5,
 			"versionMinor": 3
 		}
@@ -67,10 +72,13 @@
 	"project.versionMajor": 0,
 	"project.versionMinor": 1,
 	"project.versionProductName": "MS Access App Hook Library",
-	"project.versionRevision": 27,
+	"project.versionRevision": 49,
 	"project.warnings": {
 		"errors": [],
-		"ignored": []
+		"hints": [],
+		"ignored": [],
+		"info": [],
+		"warnings": []
 	},
 	"runtime.useUnicodeStandardLibrary": true
 }
